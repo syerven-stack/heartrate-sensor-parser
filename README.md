@@ -9,3 +9,13 @@ XOSS X2Pro 心率传感器蓝牙通信日志解析和心率报告的可视化生
 
 # 提示词：
 ## 使用heartrate-sensor-parser技能，分析xxx.txt日志，生成HTML可视化报告
+
+# 心率报告示例图：
+
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-1.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-2.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-3.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-4.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-5.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-6.png)
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/images/xoss-7.png)
