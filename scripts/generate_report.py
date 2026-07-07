@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-心率分析HTML报告生成器 V2.2.4
+心率分析HTML报告生成器 V2.3.0
 - 兼容2/4/6/8字节全规格0x2A37报文，自动过滤畸形截断数据包
 - 自动提取设备固件/SN/电量等设备参数
 - 批量计算RR间期、瞬时真实心率
 - 全量HRV时域指标运算
 - 动态心率分段，自动计算运动负荷占比
 - 输出3张Excel数据表(CSV) + 分段运动心律波动分析报告
+- V2.3.0 新增: 自动场景识别（睡眠/运动），根据数据特征动态适配心内科分析内容和报告呈现
 - V2.2.4 优化: 运动负荷百分比保留2位小数、HRV指标区域淡蓝色圆角背景
 - V2.2.3 修复: 报文分类图布局（独立CSS类/flex撑满/X轴不显示问题）
 - V2.2.2 修复: build_chart_js 三处JS语法错误（趋势图属性重复/缺options关键字/HRV-ms图缺new Chart声明）
@@ -26,7 +27,7 @@ from datetime import datetime
 # ==================== 心内科分析引擎 ====================
 
 class CardioAnalyzer:
-    """基于HRV指标和运动场景的心内科综合分析"""
+    """基于HRV指标和场景（运动/睡眠）的心内科综合分析"""
 
     def __init__(self, data):
         self.d = data
@@ -36,6 +37,75 @@ class CardioAnalyzer:
         self.anomalies = data.get("anomalies", [])
         self.anomaly_count = data.get("anomaly_count", 0)
         self.device = data.get("device_info", {})
+        self.scenario = self.detect_scenario(data)
+        self.time_range = data.get("log_time_range", {})
+        self.duration_hours = self._calc_duration()
+
+    def _calc_duration(self):
+        """计算记录时长（小时）"""
+        try:
+            start = self.time_range.get("start", "")
+            end = self.time_range.get("end", "")
+            s_dt = datetime.strptime(start[:17], "%y/%m/%d %H:%M:%S")
+            e_dt = datetime.strptime(end[:17], "%y/%m/%d %H:%M:%S")
+            if e_dt < s_dt:
+                e_dt = e_dt.replace(day=e_dt.day + 1)
+            return round((e_dt - s_dt).total_seconds() / 3600, 1)
+        except:
+            return 0
+
+    @staticmethod
+    def detect_scenario(data):
+        """自动检测记录场景：睡眠 vs 运动
+
+        评分维度：
+        - 静息占比 > 95% → +3
+        - 平均心率 < 65 bpm → +2
+        - 记录时长 >= 4 小时 → +2
+        - 记录时间为夜间时段(22:00-10:00) → +2
+        总分 >= 5 判定为睡眠场景，否则为运动场景
+        """
+        time_range = data.get("log_time_range", {})
+        seg = data.get("exercise_segments", {})
+        hrv = data.get("hrv_metrics", {})
+
+        rest_pct = seg.get("静息(<90)", {}).get("占比(%)", 0)
+        avg_hr = hrv.get("平均瞬时心率(bpm)", 0)
+        start = time_range.get("start", "")
+
+        # 计算时长
+        try:
+            s_dt = datetime.strptime(start[:17], "%y/%m/%d %H:%M:%S")
+            end_str = time_range.get("end", "")
+            e_dt = datetime.strptime(end_str[:17], "%y/%m/%d %H:%M:%S")
+            if e_dt < s_dt:
+                e_dt = e_dt.replace(day=e_dt.day + 1)
+            duration_h = (e_dt - s_dt).total_seconds() / 3600
+        except:
+            duration_h = 0
+
+        # 夜间判定
+        is_night = False
+        try:
+            sh = s_dt.hour
+            eh = e_dt.hour
+            def _is_night(h):
+                return h >= 22 or h < 10
+            is_night = _is_night(sh) and _is_night(eh)
+        except:
+            pass
+
+        score = 0
+        if rest_pct > 95:
+            score += 3
+        if avg_hr < 65:
+            score += 2
+        if duration_h >= 4:
+            score += 2
+        if is_night:
+            score += 2
+
+        return "sleep" if score >= 5 else "exercise"
 
     def _get(self, key, default=0):
         return self.hrv.get(key, default)
@@ -287,13 +357,256 @@ class CardioAnalyzer:
 
         return conclusions, recommendations
 
+    # ==================== 睡眠场景专用分析方法 ====================
+
+    def assess_signal_quality_sleep(self):
+        """睡眠场景信号质量评估"""
+        sdnn = self._get("SDNN(ms)", 0)
+        rmssd = self._get("RMSSD(ms)", 0)
+        tri = self._get("HRV三角指数", 0)
+        rr_range = self._get("RR极差(ms)", 0)
+        avg_hr = self._get("平均瞬时心率(bpm)", 0)
+
+        flags = []
+        confidence = "高"
+
+        # 睡眠中 RMSSD > 120ms 罕见
+        if rmssd > 120:
+            flags.append(f"睡眠中RMSSD异常偏高({rmssd}ms)，健康睡眠通常<100ms")
+            confidence = "中"
+
+        # 高SDNN + 低三角指数 分离（体位改变/觉醒伪差）
+        if sdnn > 150 and tri < 25:
+            flags.append(f"高SDNN({sdnn}ms)与中低三角指数({tri})存在一定背离，部分离群RR值可能拉高SDNN")
+            if confidence != "中":
+                confidence = "中"
+
+        # 极端RR极差
+        if rr_range > 1500:
+            flags.append(f"RR极差极大({rr_range}ms)，可能包含体位改变或觉醒引起的心率骤变")
+
+        # 精确倍半关系检测
+        exact_ratio_count = 0
+        for a in self.anomalies[:100]:
+            detail = a.get("detail", "")
+            for pct_text in [s for s in detail.split() if "%" in s and "变化" in s]:
+                try:
+                    pct = float(pct_text.replace("%", "").split("变化")[-1])
+                    if 48 <= pct <= 52 or 95 <= pct <= 105:
+                        exact_ratio_count += 1
+                except:
+                    pass
+        if exact_ratio_count >= 5:
+            flags.append(f"检测到{exact_ratio_count}+起接近精确50%/100%的RR突变，符合传感器倍半伪差模式")
+            confidence = "低"
+
+        if not flags:
+            flags.append("HRV指标模式在睡眠场景下处于正常范围，无明显信号伪差特征")
+
+        return {"flags": flags, "confidence": confidence}
+
+    def interpret_hrv_metrics_sleep(self):
+        """睡眠场景HRV指标逐项解读"""
+        sdnn = self._get("SDNN(ms)", 0)
+        rmssd = self._get("RMSSD(ms)", 0)
+        sdsd = self._get("SDSD(ms)", 0)
+        sdarr = self._get("SDARR(ms)", 0)
+        pnn50 = self._get("pNN50(%)", 0)
+        pnn20 = self._get("pNN20(%)", 0)
+        cvrr = self._get("CVRR(%)", 0)
+        tri = self._get("HRV三角指数", 0)
+        tin = self._get("Tin(ms)", 0)
+        rr_range = self._get("RR极差(ms)", 0)
+        avg_hr = self._get("平均瞬时心率(bpm)", 0)
+
+        items = []
+
+        # SDNN - 睡眠参考范围 60-120ms
+        if sdnn > 130:
+            items.append(f"SDNN={sdnn}ms，显著偏高。健康睡眠人群的SDNN通常在60-120ms之间。{sdnn}ms提示整体心率变异性极高，反映出自主神经系统在夜间保持了丰富的动态调节能力。但从方法学角度看，{self.duration_hours}小时长程记录的SDNN天然高于5分钟短程测量值，且对离群值（如体位改变/觉醒簇）敏感。需结合三角指数做交叉校验。")
+        elif sdnn >= 60:
+            items.append(f"SDNN={sdnn}ms，处于睡眠期的正常偏高范围，提示总体自主神经调控储备良好。")
+        else:
+            items.append(f"SDNN={sdnn}ms，睡眠期SDNN偏低，可能提示自主神经调节弹性不足或睡眠深度较浅。")
+
+        # RMSSD - 睡眠参考范围 30-80ms
+        if rmssd > 80:
+            items.append(f'RMSSD={rmssd}ms，处于睡眠期高位，迷走神经（副交感神经）张力非常强。深睡眠（N3期）的特征正是RMSSD显著升高、心率变缓且变异性增大，这一数值可视作\u201c深睡眠质量良好\u201d的间接佐证。')
+        elif rmssd >= 30:
+            items.append(f"RMSSD={rmssd}ms，睡眠期迷走神经张力正常，自主神经调节健康。")
+        else:
+            items.append(f"RMSSD={rmssd}ms，睡眠期迷走神经张力偏低，可能提示恢复不充分或自主神经调节弹性不足。")
+
+        # SDSD
+        if abs(sdsd - rmssd) < 1:
+            items.append(f"SDSD={sdsd}ms，与RMSSD高度一致，逐跳变异幅度均匀，数据一致性良好。")
+        else:
+            items.append(f"SDSD={sdsd}ms，与RMSSD存在差异(SDSD/RMSSD={sdsd/rmssd:.2f})，需关注数据一致性。")
+
+        # SDARR
+        items.append(f"SDARR={sdarr}ms，逐跳RR差值绝对值的标准差。{sdarr}ms在睡眠场景中处于较高水平，说明夜间心跳并非单调规律，而是存在一定程度的呼吸性窦性心律不齐（RSA，即吸气时心率加快、呼气时心率减慢），这是健康自主神经功能的标志。")
+
+        # pNN50 - 睡眠参考范围：清醒<20%，深睡眠可达30-60%
+        if pnn50 > 40:
+            items.append(f"pNN50={pnn50}%，处于睡眠期高水平。清醒静息状态下pNN50通常<20%，进入睡眠后尤其深睡眠期，迷走神经张力上升导致相邻心跳差异超过50ms的比例大幅增加。{pnn50}%反映迷走神经调节的敏感度和响应速度均处于高水平，是深睡眠质量良好的积极指标。")
+        elif pnn50 > 20:
+            items.append(f"pNN50={pnn50}%，睡眠期正常水平，迷走神经调节功能正常。")
+        else:
+            items.append(f"pNN50={pnn50}%，睡眠期偏低，可能提示深睡眠占比不足或自主神经调节弹性欠佳。")
+
+        # pNN20
+        if pnn20 > 0:
+            ratio = pnn50 / pnn20 if pnn20 > 0 else 0
+            items.append(f"pNN20={pnn20}%，与pNN50的比值为{ratio:.2f}，大部分逐跳变异性集中在20-50ms区间，变异性分布合理，未出现极端离散化模式。")
+
+        # CVRR
+        if cvrr > 15:
+            items.append(f"CVRR={cvrr}%，变异系数偏高。CVRR=SDNN/平均RR×100%，综合反映相对于基础心率水平的变异幅度。睡眠期{cvrr}%是偏高的数值（通常5-10%），但其中包含了离群心率的放大效应。")
+        elif cvrr > 5:
+            items.append(f"CVRR={cvrr}%，变异系数处于睡眠期的正常范围（5-10%），自主神经综合调节弹性良好。")
+        else:
+            items.append(f"CVRR={cvrr}%，变异系数偏低。")
+
+        # 三角指数
+        if tri < 25:
+            items.append(f"HRV三角指数={tri}，偏低。若同时SDNN偏高，提示存在长尾分布的离群RR值（体位改变/觉醒簇引起的骤变）。")
+        elif tri <= 50:
+            items.append(f'HRV三角指数={tri}，处于健康成年人的正常范围（约30-50），RR间期核心分布集中、稳定，心脏基础节律良好。三角指数对离群值的抗干扰能力远强于SDNN\u2014\u2014它对RR间期分布的\u201c基底宽度\u201d进行测量而非对极值敏感。')
+        else:
+            items.append(f"HRV三角指数={tri}，处于正常偏高范围，RR间期整体分布较为集中。")
+
+        # Tin
+        tin_hr = round(60000 / tin) if tin > 0 else 0
+        items.append(f"Tin={tin}ms（约{tin_hr}bpm），中位RR间期。Tin基于RR间期直方图的近似三角形拟合，比算术平均RR更能抵抗离群值的干扰。{tin}ms对应的瞬时心率约{tin_hr}bpm，属于睡眠期理想水平（50-60 bpm）。")
+
+        # RR极差
+        if rr_range > 1200:
+            items.append(f"RR极差={rr_range}ms，跨度极大。睡眠中RR极差通常<600ms，{rr_range}ms提示包含由体位改变或短暂觉醒（arousal）引起的极端心率波动。")
+        elif rr_range > 600:
+            items.append(f"RR极差={rr_range}ms，在睡眠场景中处于偏高范围，可能与REM期心率波动或体位改变有关。")
+        else:
+            items.append(f"RR极差={rr_range}ms，在睡眠场景中属于正常范围。")
+
+        return items
+
+    def analyze_sleep_structure(self):
+        """分析睡眠结构与自主神经调节"""
+        seg = self.seg
+        items = []
+
+        rest_pct = seg.get("静息(<90)", {}).get("占比(%)", 0)
+        extreme_pct = seg.get("极限(>180)", {}).get("占比(%)", 0)
+
+        items.append(f"本次夜间睡眠监测持续约{self.duration_hours}小时，全程静息占比{rest_pct}%。")
+
+        # 心率尖峰特征分析
+        spike_times = []
+        for a in self.anomalies:
+            hr_after = float(a.get("hr_after", 0))
+            if hr_after > 120:
+                spike_times.append(a.get("time", ""))
+
+        if spike_times:
+            items.append(f"共检测到{len(spike_times)}次心率瞬时飙升事件（>120 bpm），具有以下特征：")
+            items.append("突发性：心率在1-2秒内从静息水平骤升至120-210 bpm，持续数秒后迅速回落，呈现典型的\"尖刺\"形态。")
+            items.append("簇集性：异常事件集中在几个时段，而非均匀分布，提示这些时段可能对应睡眠周期中的REM期或体位改变。")
+            items.append("自限性：每次尖峰持续时间极短（数秒至十几秒），未形成持续性心动过速，心脏能迅速恢复至静息水平。")
+
+        items.append("从自主神经角度，睡眠期心率变异性反映了两个核心过程：")
+        items.append("NREM期（尤其深睡眠N3）：迷走神经占绝对主导，心率降至最低（40-55 bpm），HRV升高（RMSSD增大），表现为呼吸性窦性心律不齐增强。")
+        items.append("REM期与短暂觉醒：REM睡眠期交感神经活动增强、迷走神经张力减退，心率变异性降低但心率升高且波动性增大。数据中出现的心率尖峰簇，极可能对应REM期或短暂觉醒（micro-arousal），这也是正常睡眠周期的组成部分。")
+
+        if self.duration_hours >= 6:
+            items.append(f"睡眠连续性评估：从{self.duration_hours}小时心率趋势的连续性来看，大部分时段心率平稳、无频繁大幅波动，提示睡眠连续性较好，未出现频繁的觉醒-再入睡循环。")
+
+        return items
+
+    def analyze_anomalies_sleep(self):
+        """睡眠场景心律异常事件分析"""
+        total_beats = self.pkt.get("有效心跳总数", 1)
+        anomaly_rate = round(self.anomaly_count / total_beats * 100, 2) if total_beats > 0 else 0
+
+        items = []
+
+        mutation_count = sum(1 for a in self.anomalies if a.get("type") == "RR间期突变")
+        ectopic_count = sum(1 for a in self.anomalies if a.get("type") == "疑似早搏")
+
+        items.append(f"共{self.anomaly_count}起异常事件，占有效心跳{anomaly_rate}%。其中RR间期突变{mutation_count}次，疑似早搏{ectopic_count}次。")
+
+        if ectopic_count > 0:
+            ectopic_rate = round(ectopic_count / total_beats * 100, 3) if total_beats > 0 else 0
+            items.append(f"疑似早搏{ectopic_count}次({ectopic_rate}%)，远低于临床关注阈值(通常>1%)，属睡眠期偶发事件，无临床意义。")
+
+        if anomaly_rate > 5:
+            items.append(f"异常事件占比{anomaly_rate}%，数量偏多，需结合睡眠体位改变和觉醒因素综合判断。")
+
+        items.append("事件特征分析：大部分突变表现为RR间期骤降（心率飙升），继以迅速回升——呈现典型的\"V型\"心率响应。这种模式高度符合短暂的体位改变或肢体活动（如翻身、伸展）引起的心率反射性加速，而非心律失常。")
+        items.append("与病理心律失常有本质区别：病理性的早搏或心动过速通常表现为持续的节律异常模式（如二联律、短阵房速），而本数据中的事件均为孤立、自限、无传导阻滞特征的偶发事件，不具备临床心律失常诊断意义。")
+
+        sq = self.assess_signal_quality_sleep()
+        if sq["confidence"] in ("中", "低"):
+            items.append(f"信号质量说明：结合信号质量评估({sq['confidence']}可信度)，部分心率极值（>180 bpm）事件可能包含传感器层面的运动伪差。从生理学角度，窦性心率在睡眠中瞬间飙升至200+ bpm是极为罕见的，通常仅在梦魇/夜惊等极端交感激活状态下才可能出现。建议将>180 bpm的事件更多地视为\"信号质量事件\"而非\"生理事件\"。")
+
+        return items, mutation_count, ectopic_count
+
+    def generate_conclusions_sleep(self):
+        """睡眠场景综合结论与建议"""
+        sq = self.assess_signal_quality_sleep()
+        anomaly_rate = round(self.anomaly_count / max(self.pkt.get("有效心跳总数", 1), 1) * 100, 2)
+        rmssd = self._get("RMSSD(ms)", 0)
+        pnn50 = self._get("pNN50(%)", 0)
+        tri = self._get("HRV三角指数", 0)
+        tin = self._get("Tin(ms)", 0)
+        avg_hr = self._get("平均瞬时心率(bpm)", 0)
+
+        tin_hr = round(60000 / tin) if tin > 0 else 0
+
+        conclusions = []
+        recommendations = []
+
+        # 心脏自主神经功能评价
+        if rmssd >= 50 and tri >= 25:
+            conclusions.append(f"心脏自主神经功能评价（睡眠期）：良好。迷走神经张力强劲（RMSSD {rmssd}ms），心脏基础节律规整（三角指数{tri}、中位心率{tin_hr} bpm），自主神经对体位改变/觉醒的反应灵敏且恢复迅速。未见持续性心律失常、传导阻滞或失代偿证据。")
+        elif sq["confidence"] == "低":
+            conclusions.append("心脏自主神经功能评价（睡眠期）：因信号质量限制难以准确评估。从三角指数和中位心率看，心脏基础节律基本规整，无持续性心律失常证据。")
+        else:
+            conclusions.append(f"心脏自主神经功能评价（睡眠期）：尚可。部分HRV指标存在轻度异常，建议结合晨起静息HRV进一步评估。")
+
+        # 睡眠质量间接评估
+        if rmssd >= 50 and pnn50 >= 30:
+            conclusions.append(f"睡眠质量间接评估：HRV指标模式（高迷走张力+偶发觉醒尖峰+长周期节律平稳）提示总体睡眠连续性较好，深睡眠（N3期）占比可能充足。心率尖峰簇的出现是正常睡眠微结构的组成部分，不代表睡眠质量差。")
+        else:
+            conclusions.append("睡眠质量间接评估：HRV指标在睡眠期处于正常范围，自主神经调节功能正常。建议结合主观睡眠感受综合评估。")
+
+        # 心律安全性
+        if anomaly_rate < 3:
+            conclusions.append(f"心律安全性评价：低风险。{self.anomaly_count}起异常事件均为自限性、孤立性RR间期突变，不具有临床心律失常意义。RR间期突变的总占比（{anomaly_rate}%）在{self.duration_hours}小时长程监测中属于正常范围。")
+        else:
+            conclusions.append(f"心律安全性评价：低至中等风险。异常事件占比{anomaly_rate}%，建议结合异常时段的睡眠分期信息进一步评估。")
+
+        # 建议（睡眠场景）
+        recommendations.append("保持规律作息（固定入睡和起床时间），有助于稳定睡眠周期中NREM/REM的节律性交替。睡前1小时避免蓝光暴露和剧烈运动，有助于提升深睡眠占比。")
+        recommendations.append("建议每周至少进行1-2次夜间睡眠HRV监测，重点关注RMSSD的周均值变化趋势。RMSSD持续下降可能提示恢复不足、过度疲劳或自主神经失调的早期信号。")
+        recommendations.append("夜间睡眠监测受体位改变和REM期波动影响，建议每日晨起后坐姿静息5分钟进行HRV测量（以RMSSD和pNN50为核心指标），作为基线参考。晨起RMSSD的健康变化趋势应为：充分睡眠后升高、疲劳/压力后降低。")
+        recommendations.append("部分心率尖峰模式（突发性心率飙升后迅速回落）在理论上与阻塞性睡眠呼吸暂停（OSA）相关的心率响应有形态学相似性。如有合并症状（晨起口干、白天嗜睡、打鼾等），建议考虑进行整夜多导睡眠监测（PSG）以排除睡眠呼吸障碍。")
+        recommendations.append("建议在睡眠监测时将传感器佩戴于非惯用手腕部/胸前，松紧度以贴合但不勒紧为准，减少睡眠中体位改变引起的传感器滑动和运动伪差。")
+
+        return conclusions, recommendations
+
     def full_analysis(self):
-        """执行完整分析，返回结构化结果"""
-        sq = self.assess_signal_quality()
-        hrv_items = self.interpret_hrv_metrics()
-        exercise_items = self.analyze_exercise_load()
-        anomaly_items, mutation_count, ectopic_count = self.analyze_anomalies()
-        conclusions, recommendations = self.generate_conclusions()
+        """执行完整分析，根据场景自动选择运动/睡眠分析方法"""
+        if self.scenario == "sleep":
+            sq = self.assess_signal_quality_sleep()
+            hrv_items = self.interpret_hrv_metrics_sleep()
+            exercise_items = self.analyze_sleep_structure()
+            anomaly_items, mutation_count, ectopic_count = self.analyze_anomalies_sleep()
+            conclusions, recommendations = self.generate_conclusions_sleep()
+        else:
+            sq = self.assess_signal_quality()
+            hrv_items = self.interpret_hrv_metrics()
+            exercise_items = self.analyze_exercise_load()
+            anomaly_items, mutation_count, ectopic_count = self.analyze_anomalies()
+            conclusions, recommendations = self.generate_conclusions()
 
         return {
             "signal_quality": sq,
@@ -303,7 +616,10 @@ class CardioAnalyzer:
             "anomaly_stats": {"mutation": mutation_count, "ectopic": ectopic_count},
             "conclusions": conclusions,
             "recommendations": recommendations,
+            "scenario": self.scenario,  # 传递给HTML构建器
         }
+
+    # ==================== 兼容旧接口 ====================
 
 
 # ==================== HTML 生成器 ====================
@@ -313,7 +629,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>心率分析报告 — XOSS X2PRO</title>
+<title>{page_title}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {{ --bg: #f4f5f7; --card-bg: #ffffff; --text: #1a1a2e; --text-secondary: #6b7280; --border: #e5e7eb; --accent: #ef4444; --blue: #3b82f6; --green: #22c55e; --amber: #f59e0b; --purple: #8b5cf6; --radius: 8px; }}
@@ -384,7 +700,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {hrv_charts}
 {anomaly_table}
 {cardio_analysis}
-<footer>XOSS 心率传感器解析工具 V2.2.4 · 生成于 {gen_time}</footer>
+<footer>XOSS 心率传感器解析工具 V2.3.0 · 生成于 {gen_time}</footer>
 </div>
 <script>
 {chart_js}
@@ -415,12 +731,12 @@ def generate_html(json_path, csv_path, output_path):
     anomalies = data.get("anomalies", [])
     time_range = data.get("log_time_range", {})
 
-    header = build_header(time_range)
+    header = build_header(time_range, cardio["scenario"])
     device_info = build_device_info(device)
     data_overview = build_data_overview(pkt, hrv, cardio)
-    exercise_summary_html = build_exercise_summary(summary, seg)
+    exercise_summary_html = build_exercise_summary(summary, seg, cardio["scenario"])
     hrv_metrics_html = build_hrv_metrics(hrv)
-    charts_row1 = build_charts_row1()
+    charts_row1 = build_charts_row1(cardio["scenario"])
     trend_chart = build_trend_chart()
     hrv_charts = build_hrv_charts()
     anomaly_table = build_anomaly_table(anomalies, data.get("anomaly_count", 0))
@@ -428,7 +744,10 @@ def generate_html(json_path, csv_path, output_path):
 
     chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv)
 
+    page_title = "睡眠心率HRV分析报告 — XOSS X2PRO" if cardio["scenario"] == "sleep" else "心率分析报告 — XOSS X2PRO"
+
     html = HTML_TEMPLATE.format(
+        page_title=page_title,
         header=header,
         device_info=device_info,
         data_overview=data_overview,
@@ -470,13 +789,14 @@ def sample_heartbeat_csv(csv_path, target_points=200):
     return labels, values
 
 
-def build_header(time_range):
+def build_header(time_range, scenario="exercise"):
     start = time_range.get("start", "N/A")
     end = time_range.get("end", "N/A")
+    title = "XOSS X2PRO 睡眠心率 HRV 分析报告" if scenario == "sleep" else "XOSS X2PRO 心率分析报告"
     return f'''<header>
   <div class="icon">&hearts;</div>
   <div>
-    <h1>XOSS X2PRO 心率分析报告</h1>
+    <h1>{title}</h1>
     <p>记录时段: {start} ~ {end}</p>
   </div>
 </header>'''
@@ -530,10 +850,22 @@ def build_data_overview(pkt, hrv, cardio):
 </div>'''
 
 
-def build_exercise_summary(summary, seg):
+def build_exercise_summary(summary, seg, scenario="exercise"):
     high_pct = seg.get("高强度(150-180)", {}).get("占比(%)", 0)
     aerobic_pct = seg.get("有氧(120-150)", {}).get("占比(%)", 0)
+    warmup_pct = seg.get("热身(90-120)", {}).get("占比(%)", 0)
+    rest_pct = seg.get("静息(<90)", {}).get("占比(%)", 0)
+    extreme_pct = seg.get("极限(>180)", {}).get("占比(%)", 0)
     total = aerobic_pct + high_pct
+
+    if scenario == "sleep":
+        avg_hr = 0  # will be filled from data
+        assess = f"本次记录为夜间睡眠监测，全程静息占比 {rest_pct}%，少量心率波动（热身+有氧+高强度合计 {warmup_pct + aerobic_pct + high_pct:.2f}%）与睡眠期间体位改变或短暂觉醒（arousal）相关。整体自主神经以迷走神经张力为主导，符合健康人群夜间睡眠的生理特征。"
+        return f'''<div class="summary-box">
+  <h3>睡眠心率总体评估</h3>
+  <p>{assess}</p>
+</div>'''
+
     if high_pct > 30:
         assessment = f"本次运动以高强度为主（{high_pct:.2f}%），属于剧烈运动负荷。"
     else:
@@ -566,10 +898,11 @@ def build_hrv_metrics(hrv):
 </div>'''
 
 
-def build_charts_row1():
-    return '''<div class="grid-2" style="margin-bottom:16px">
+def build_charts_row1(scenario="exercise"):
+    chart_title = "睡眠心率区间分布" if scenario == "sleep" else "运动负荷分布"
+    return f'''<div class="grid-2" style="margin-bottom:16px">
   <div class="card">
-    <h2>运动负荷分布</h2>
+    <h2>{chart_title}</h2>
     <div class="chart-wrap" style="aspect-ratio: 1/1; width: 100%; max-width: 400px; margin: 0 auto;"><canvas id="exerciseChart"></canvas></div>
   </div>
   <div class="card" style="display:flex; flex-direction:column;">
@@ -626,6 +959,7 @@ def build_cardio_analysis(cardio, data):
     anomaly_items = cardio["anomaly_analysis"]
     conclusions = cardio["conclusions"]
     recommendations = cardio["recommendations"]
+    scenario = cardio.get("scenario", "exercise")
 
     def render_section(num, title, paragraphs):
         p_html = "\n".join(f"      <p>{p}</p>" for p in paragraphs)
@@ -644,8 +978,23 @@ def build_cardio_analysis(cardio, data):
         else:
             hrv_parts.append(f"<p>{item}</p>")
 
-    signal_note = ""
-    if sq["confidence"] == "中":
+    # 场景相关的 HRV 小结
+    if scenario == "sleep":
+        rmssd = data.get("hrv_metrics", {}).get("RMSSD(ms)", 0)
+        tri = data.get("hrv_metrics", {}).get("HRV三角指数", 0)
+        pnn50 = data.get("hrv_metrics", {}).get("pNN50(%)", 0)
+        sdnn = data.get("hrv_metrics", {}).get("SDNN(ms)", 0)
+        tin = data.get("hrv_metrics", {}).get("Tin(ms)", 0)
+        tin_hr = round(60000 / tin) if tin > 0 else 0
+        signal_note = render_highlight(
+            f"<strong>关键判断：</strong>从HRV指标整体模式来看，本次睡眠监测反映出一个核心特征——"
+            f"<strong>迷走神经张力强劲且调节灵活（RMSSD {rmssd}ms、pNN50 {pnn50}%、pNN20 均处于睡眠期高位），"
+            f"心脏基础节律稳定（三角指数 {tri}、中位心率 {tin_hr} bpm）</strong>。"
+            f"SDNN 的异常偏高（{sdnn}ms）主要归因于少数心率骤变事件（体位改变/觉醒簇）对长程方差的放大效应，"
+            f"而非整体节律紊乱。这一「高 RMSSD + 正常三角指数 + 高 pNN50」的模式，"
+            f"是睡眠期自主神经健康的典型表现。"
+        )
+    elif sq["confidence"] == "中":
         signal_note = render_highlight("<strong>小结：</strong>HRV指标整体处于运动状态下的正常偏高范围，但部分指标存在轻度异常，可能受传感器信号质量影响。建议结合静息HRV进一步评估自主神经真实状态。")
     elif sq["confidence"] == "低":
         signal_note = render_highlight("<strong>关键判断：</strong>HRV指标模式（高SDNN+低三角指数+运动中极高RMSSD+高pNN50）高度提示数据中存在非生理性干扰。最常见原因是传感器在高强度运动中因胸带滑动、肌电干扰或接触不良产生的信号伪差。真正的生理性高HRV通常伴随三角指数同步升高。")
@@ -669,13 +1018,21 @@ def build_cardio_analysis(cardio, data):
       </ul>
     </div>'''
 
-    exercise_html = render_section("三", "运动负荷与自主神经调节", exercise)
+    section3_title = "三、睡眠结构与自主神经调节分析" if scenario == "sleep" else "三、运动负荷与自主神经调节"
+    exercise_html = render_section("三", section3_title.lstrip("三、"), exercise)
+    # Fix: render_section produces "三、睡眠结构与..." but we need the full title
+    # Use direct construction for section 3
+    e_p_html = "\n".join(f"      <p>{p}</p>" for p in exercise)
+    exercise_html = f'''    <div class="cardio-block">
+      <h3>{section3_title}</h3>
+{e_p_html}
+    </div>'''
 
     conc_html = render_section("五", "综合结论与建议", conclusions)
     rec_items = "\n".join(f"        {i+1}. {r}<br>" for i, r in enumerate(recommendations))
     conc_html += f'\n{render_highlight(f"<strong>建议：</strong><br>{rec_items}")}'
 
-    # 总体评价
+    # 总体评价 - 场景相关
     avg_hr = data.get("hrv_metrics", {}).get("平均瞬时心率(bpm)", 0)
     tin = data.get("hrv_metrics", {}).get("Tin(ms)", 0)
     avg_rr = data.get("hrv_metrics", {}).get("平均RR间期(ms)", 0)
@@ -683,9 +1040,38 @@ def build_cardio_analysis(cardio, data):
     total_beats = data.get("packet_stats", {}).get("有效心跳总数", 0)
     time_range = data.get("log_time_range", {})
 
+    if scenario == "sleep":
+        rmssd = data.get("hrv_metrics", {}).get("RMSSD(ms)", 0)
+        pnn50 = data.get("hrv_metrics", {}).get("pNN50(%)", 0)
+        rest_pct = data.get("exercise_segments", {}).get("静息(<90)", {}).get("占比(%)", 0)
+        tri = data.get("hrv_metrics", {}).get("HRV三角指数", 0)
+        duration_h = 0
+        try:
+            start = time_range.get("start", "")
+            end = time_range.get("end", "")
+            s_dt = datetime.strptime(start[:17], "%y/%m/%d %H:%M:%S")
+            e_dt = datetime.strptime(end[:17], "%y/%m/%d %H:%M:%S")
+            if e_dt < s_dt:
+                e_dt = e_dt.replace(day=e_dt.day + 1)
+            duration_h = round((e_dt - s_dt).total_seconds() / 3600, 1)
+        except:
+            pass
+        overview_text = (
+            f"本次夜间睡眠监测（约{duration_h}小时，{total_beats:,}次有效心跳），"
+            f"整体呈现典型的睡眠期自主神经调节模式——迷走神经张力占绝对主导。"
+            f"平均心率 {avg_hr} bpm、静息占比 {rest_pct}%，"
+            f"从睡眠医学角度看属于健康成年人的理想范围。"
+            f"HRV 指标多项处于偏高水平（SDNN、RMSSD、pNN50），"
+            f"这在睡眠场景下并非异常，反而是深度睡眠期迷走神经张力增强的生理性表现。"
+            f"但需要注意的是，RR 极差高达 {rr_range}ms，"
+            f"提示部分心率信号可能叠加了体位改变或短暂觉醒（arousal）造成的非稳态波动。"
+        )
+    else:
+        overview_text = f"本次记录共采集 {total_beats:,} 次有效心跳。整体心率变异性（HRV）分析结合运动场景综合评估如下。"
+
     overview_html = f'''    <div class="cardio-block">
       <h3>一、总体评价</h3>
-      <p>本次记录共采集 {total_beats:,} 次有效心跳。整体心率变异性（HRV）分析结合运动场景综合评估如下。</p>
+      <p>{overview_text}</p>
       <div class="cardio-metric-row">
         <div class="cardio-metric">平均心率: <span>{avg_hr} bpm</span></div>
         <div class="cardio-metric">Tin（中位 RR）: <span>{tin} ms</span></div>

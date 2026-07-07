@@ -1,16 +1,39 @@
 ---
 skill_name: heartrate-sensor-parser
-version: V2.2.4 纯Python标准库版 + HTML报告生成 + 心内科分析
+version: V2.3.0 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + HTML报告生成
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
-function: XOSS心率日志解析、RR/心率换算、全量HRV计算、运动分段分析、HTML可视化报告、心内科综合分析
+function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(含Chart.js图表+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.2.4
+# heartrate-sensor-parser 技能使用手册 V2.3.0
 
 ## 一、技能概述
-专用XOSS心率设备BLE调试日志离线解析工具。自动识别2/4/6/8字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR间期、全量HRV时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），动态划分运动负荷区间（静息/热身/有氧/高强度/极限），检测心律异常（RR间期突变/疑似早搏），输出标准化Excel三表+CSV+JSON+分段运动心律波动分析报告+HTML可视化报告（含Chart.js图表和心内科综合分析）。
+专用XOSS心率设备BLE调试日志离线解析工具。自动识别2/4/6/8字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR间期、全量HRV时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR间期突变/疑似早搏），输出标准化Excel三表+CSV+JSON+分段运动心律波动分析报告+HTML可视化报告（含Chart.js图表和双模式心内科综合分析）。
+
+### V2.3.0 新增内容（对比V2.2.4）
+**核心升级：场景自动识别 + 睡眠/运动双模式分析引擎**
+
+1. **场景自动检测** — `CardioAnalyzer.detect_scenario()` 基于四维评分自动判定场景：
+   - 静息占比 > 95%（+3分）
+   - 平均心率 < 65 bpm（+2分）
+   - 记录时长 >= 4小时（+2分）
+   - 记录时段为夜间 22:00-10:00（+2分）
+   - 总分 >= 5 → 睡眠场景，否则 → 运动场景
+
+2. **睡眠场景专用分析方法**：
+   - `interpret_hrv_metrics_sleep()` — HRV指标以睡眠生理参考范围解读（SDNN 60-120ms、RMSSD 30-80ms、pNN50 20-60%）
+   - `analyze_sleep_structure()` — 分析NREM/REM期心率特征、心率尖峰簇集性、睡眠连续性评估
+   - `analyze_anomalies_sleep()` — 区分体位改变/觉醒引起的V型心率响应与病理性心律失常
+   - `generate_conclusions_sleep()` — 包含心脏自主神经评价、睡眠质量间接评估、OSA筛查提示等
+   - `assess_signal_quality_sleep()` — 睡眠场景专用的信号质量评估阈值
+
+3. **报告模板动态适配**：
+   - 标题自动切换：`心率分析报告` ↔ `睡眠心率 HRV 分析报告`
+   - 摘要框切换：`运动负荷评估` ↔ `睡眠心率总体评估`
+   - 图表标题切换：`运动负荷分布` ↔ `睡眠心率区间分布`
+   - 心内科分析五大部分全部根据场景动态生成
 
 ### V2.2.4 优化内容（对比V2.2.3）
 两项 HTML 报告显示优化：
