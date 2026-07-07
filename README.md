@@ -9,7 +9,13 @@
 
 - 方法2：对话框中，输入帮我安装这个https://github.com/syerven-stack/heartrate-sensor-parser.git技能
 
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/blob/main/images/codex-1.png)
+
 - 使用方法: 对话框中，输入提示词：使用heartrate-sensor-parser技能，分析heart_rate_0701.txt日志，生成HTML可视化报告
+
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/blob/main/images/codex-2.png)
+
+![image](https://github.com/syerven-stack/heartrate-sensor-parser/blob/main/images/codex-3.png)
 
 
 ## 在claude code中添加此skill：
