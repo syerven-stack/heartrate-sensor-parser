@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-心率分析HTML报告生成器 V2.3.0
+心率分析HTML报告生成器 V2.3.3
 - 兼容2/4/6/8字节全规格0x2A37报文，自动过滤畸形截断数据包
 - 自动提取设备固件/SN/电量等设备参数
 - 批量计算RR间期、瞬时真实心率
 - 全量HRV时域指标运算
 - 动态心率分段，自动计算运动负荷占比
 - 输出3张Excel数据表(CSV) + 分段运动心律波动分析报告
+- V2.3.3 优化: 报告图表布局重组——HRV(ms)/(%)两张柱状图上移至心率趋势图上方；HRV数值面板下移至运动负荷分布图表行正下方，便于图表与数值对照
+- V2.3.2 优化: 心律异常事件由表格改为散点图（横轴相对时间、纵轴|ΔHR|、按类型分色），直观呈现异常时段与剧烈程度
+- V2.3.1 修复: 运动负荷评估改为完全基于心率区间分布动态归纳（修复原硬编码“有氧+高强度为主(31.3%)”误判），结论建议同步动态化
 - V2.3.0 新增: 自动场景识别（睡眠/运动），根据数据特征动态适配心内科分析内容和报告呈现
 - V2.2.4 优化: 运动负荷百分比保留2位小数、HRV指标区域淡蓝色圆角背景
 - V2.2.3 修复: 报文分类图布局（独立CSS类/flex撑满/X轴不显示问题）
@@ -344,8 +347,18 @@ class CardioAnalyzer:
         else:
             conclusions.append("心律安全性评价：低风险（考虑信号伪差因素）。去除疑似伪差后，真实心律异常数量有限。")
 
-        # 建议
-        recommendations.append("保持当前运动强度与结构，有氧+高强度混合训练对心肺功能提升效果显著。")
+        # 建议（依据真实负荷分布动态表述）
+        hi_pct_r = self.seg.get("高强度(150-180)", {}).get("占比(%)", 0)
+        ext_pct_r = self.seg.get("极限(>180)", {}).get("占比(%)", 0)
+        aer_pct_r = self.seg.get("有氧(120-150)", {}).get("占比(%)", 0)
+        warm_pct_r = self.seg.get("热身(90-120)", {}).get("占比(%)", 0)
+        hi_total_r = hi_pct_r + ext_pct_r
+        if hi_total_r >= 5:
+            recommendations.append("保持当前运动强度与结构，有氧+高强度混合训练对心肺功能提升效果显著。")
+        elif aer_pct_r >= 30 or warm_pct_r >= 30:
+            recommendations.append("保持当前以有氧/热身为主的训练结构，规律的有氧耐力训练对心肺功能与迷走神经张力提升效果显著。")
+        else:
+            recommendations.append("当前运动强度整体偏低，可在身体适应后逐步增加有氧时长与强度，以获得更明显的心肺适能提升。")
         recommendations.append("建议在训练中增加5-10分钟的整理活动，促进迷走神经再激活和心率恢复。")
         recommendations.append("关注运动后1-2分钟的HRR(心率恢复值)：从峰值下降>12bpm为正常，>25bpm为优秀。")
 
@@ -694,13 +707,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {device_info}
 {data_overview}
 {exercise_summary}
-{hrv_metrics}
 {charts_row1}
-{trend_chart}
+{hrv_metrics}
 {hrv_charts}
+{trend_chart}
 {anomaly_table}
 {cardio_analysis}
-<footer>XOSS 心率传感器解析工具 V2.3.0 · 生成于 {gen_time}</footer>
+<footer>XOSS 心率传感器解析工具 V2.3.3 · 生成于 {gen_time}</footer>
 </div>
 <script>
 {chart_js}
@@ -739,10 +752,10 @@ def generate_html(json_path, csv_path, output_path):
     charts_row1 = build_charts_row1(cardio["scenario"])
     trend_chart = build_trend_chart()
     hrv_charts = build_hrv_charts()
-    anomaly_table = build_anomaly_table(anomalies, data.get("anomaly_count", 0))
+    anomaly_table = build_anomaly_chart(anomalies, data.get("anomaly_count", 0))
     cardio_html = build_cardio_analysis(cardio, data)
 
-    chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv)
+    chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies)
 
     page_title = "睡眠心率HRV分析报告 — XOSS X2PRO" if cardio["scenario"] == "sleep" else "心率分析报告 — XOSS X2PRO"
 
@@ -856,8 +869,6 @@ def build_exercise_summary(summary, seg, scenario="exercise"):
     warmup_pct = seg.get("热身(90-120)", {}).get("占比(%)", 0)
     rest_pct = seg.get("静息(<90)", {}).get("占比(%)", 0)
     extreme_pct = seg.get("极限(>180)", {}).get("占比(%)", 0)
-    total = aerobic_pct + high_pct
-
     if scenario == "sleep":
         avg_hr = 0  # will be filled from data
         assess = f"本次记录为夜间睡眠监测，全程静息占比 {rest_pct}%，少量心率波动（热身+有氧+高强度合计 {warmup_pct + aerobic_pct + high_pct:.2f}%）与睡眠期间体位改变或短暂觉醒（arousal）相关。整体自主神经以迷走神经张力为主导，符合健康人群夜间睡眠的生理特征。"
@@ -866,10 +877,56 @@ def build_exercise_summary(summary, seg, scenario="exercise"):
   <p>{assess}</p>
 </div>'''
 
-    if high_pct > 30:
-        assessment = f"本次运动以高强度为主（{high_pct:.2f}%），属于剧烈运动负荷。"
+    # ---- 动态评估：依据各负荷区间实际占比归纳主导区间与强度 ----
+    zone_map = [
+        ("静息", rest_pct),
+        ("热身", warmup_pct),
+        ("有氧", aerobic_pct),
+        ("高强度", high_pct),
+        ("极限", extreme_pct),
+    ]
+    hi_total = high_pct + extreme_pct  # 高强度及以上合计
+
+    # 按占比降序累加，覆盖约 80% 总分布作为“主要区间”（至少含前两大有效区间）
+    ordered = sorted(zone_map, key=lambda x: x[1], reverse=True)
+    main_zones = []
+    cum = 0.0
+    for name, pct in ordered:
+        if pct <= 0:
+            continue
+        main_zones.append((name, pct))
+        cum += pct
+        if cum >= 80.0:
+            break
+    if len(main_zones) < 2:
+        for name, pct in ordered:
+            if pct > 0 and (name, pct) not in main_zones:
+                main_zones.append((name, pct))
+                if len(main_zones) >= 2:
+                    break
+
+    main_names = [n for n, _ in main_zones]
+    main_total = sum(p for _, p in main_zones)
+
+    # 负荷强度定性
+    if hi_total >= 5:
+        load_level = "高强度/剧烈"
+    elif "有氧" in main_names:
+        load_level = "以有氧为主的中等"
+    elif "热身" in main_names:
+        load_level = "以热身为主的低-中等"
     else:
-        assessment = f"本次运动以有氧+高强度为主（合计 {total:.2f}%），属于剧烈运动负荷。"
+        load_level = "以静息为主的低"
+
+    # 高强度判定描述
+    if hi_total >= 5:
+        hi_desc = f"，其中高强度及以上区间合计 {hi_total:.2f}%"
+    else:
+        hi_desc = f"，未出现有临床意义的高强度区间（高强度及以上合计仅 {hi_total:.2f}%）"
+
+    zone_cn = "、".join(main_names)
+    assessment = (f"本次运动以{zone_cn}区间为主（合计 {main_total:.2f}%），"
+                  f"整体为{load_level}运动负荷{hi_desc}。")
     return f'''<div class="summary-box">
   <h3>运动负荷评估</h3>
   <p>{assessment} 建议关注恢复期心率回落速度，避免过度训练。</p>
@@ -932,23 +989,14 @@ def build_hrv_charts():
 </div>'''
 
 
-def build_anomaly_table(anomalies, total_count):
-    rows = []
-    for i, a in enumerate(anomalies[:20]):
-        atype = a.get("type", "")
-        badge_class = "badge-mutation" if "突变" in atype else "badge-ectopic"
-        hr_before = a.get("hr_before", "")
-        hr_after = a.get("hr_after", "")
-        rows.append(f'<tr><td>{i+1}</td><td>{a.get("time","")[-8:]}</td><td><span class="badge {badge_class}">{atype}</span></td><td>{a.get("detail","")}</td><td>{hr_before}→{hr_after} bpm</td>')
-
+def build_anomaly_chart(anomalies, total_count):
+    mut = sum(1 for a in anomalies if "突变" in a.get("type", ""))
+    ect = sum(1 for a in anomalies if "早搏" in a.get("type", ""))
+    detail_n = len(anomalies)
     return f'''<div class="card" style="margin-bottom:16px">
-  <h2>心律异常事件（前 20 条 / 共 {total_count:,} 条）</h2>
-  <div style="overflow-x:auto">
-    <table class="anomaly-table">
-      <thead><tr><th>#</th><th>时间</th><th>类型</th><th>详情</th><th>心率变化</th></tr></thead>
-      <tbody>{"".join(rows)}</tbody>
-    </table>
-  </div>
+  <h2>心律异常事件分布（共 {total_count:,} 起，下图展示明细 {detail_n} 条：RR间期突变 {mut} 次 / 疑似早搏 {ect} 次）</h2>
+  <p style="margin:0 0 10px;color:#666;font-size:13px">下图按时间顺序展示每起异常事件：横轴为相对时间（自首次异常起，分钟），纵轴为心率跳变幅度 |ΔHR|（bpm）。可直观观察异常事件的集中时段与剧烈程度，悬停查看具体时间与心率变化。</p>
+  <div class="chart-wrap" style="height:360px"><canvas id="anomalyChart"></canvas></div>
 </div>'''
 
 
@@ -1092,7 +1140,7 @@ def build_cardio_analysis(cardio, data):
 </div>'''
 
 
-def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv):
+def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None):
     """生成Chart.js脚本 - 优化版: 高清、圆环样式、悬停性能提升"""
     # 运动负荷数据
     seg_keys = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
@@ -1116,6 +1164,32 @@ def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv):
         hrv.get("pNN50(%)", 0), hrv.get("pNN20(%)", 0),
         hrv.get("CVRR(%)", 0), hrv.get("HRV三角指数", 0)
     ]
+
+    # 异常事件散点数据（横轴=相对时间分钟，纵轴=心率跳变幅度 |ΔHR|）
+    _anom_all = []
+    _min_dt = None
+    for a in (anomalies or []):
+        try:
+            _dt = datetime.strptime(a.get("time", ""), "%d/%m/%y %H:%M:%S:%f")
+        except Exception:
+            continue
+        if _min_dt is None or _dt < _min_dt:
+            _min_dt = _dt
+        _anom_all.append((_dt, a))
+    _mut_pts, _ect_pts = [], []
+    for _dt, a in _anom_all:
+        _x = round((_dt - _min_dt).total_seconds() / 60, 2) if _min_dt else 0
+        _hb = a.get("hr_before", 0) or 0
+        _ha = a.get("hr_after", 0) or 0
+        _pt = {"x": _x, "y": round(abs(_ha - _hb), 1),
+               "t": a.get("time", ""), "ty": a.get("type", ""),
+               "d": a.get("detail", ""), "h": f"{_hb}→{_ha}"}
+        if "早搏" in a.get("type", ""):
+            _ect_pts.append(_pt)
+        else:
+            _mut_pts.append(_pt)
+    mut_json = json.dumps(_mut_pts, ensure_ascii=False)
+    ect_json = json.dumps(_ect_pts, ensure_ascii=False)
 
     # 全局DPI适配：最小2x高清
     dpi_fallback = 'Math.max(window.devicePixelRatio || 2, 2)'
@@ -1316,6 +1390,38 @@ new Chart(document.getElementById('hrvPctChart'), {{
     }},
     scales: {{
       y: {{ title: {{ display: true, text: '% / 指数值', font: {{ size: 11 }} }}, beginAtZero: true }}
+    }}
+  }}
+}});
+
+// === 心律异常事件散点图 ===
+new Chart(document.getElementById('anomalyChart'), {{
+  type: 'scatter',
+  data: {{
+    datasets: [
+      {{ label: 'RR间期突变', data: {mut_json}, backgroundColor: '#f59e0b', pointRadius: 4, pointHoverRadius: 6 }},
+      {{ label: '疑似早搏', data: {ect_json}, backgroundColor: '#ef4444', pointRadius: 4, pointHoverRadius: 6 }}
+    ]
+  }},
+  options: {{
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {{
+      legend: {{ position: 'bottom' }},
+      tooltip: {{
+        callbacks: {{
+          title: function(ctx) {{ return '相对时间 ' + ctx[0].parsed.x + ' 分钟'; }},
+          label: function(ctx) {{
+            var d = ctx.raw;
+            return d.ty + ' @ ' + d.t + '  ' + d.h + ' bpm  (' + d.d + ')';
+          }}
+        }}
+      }}
+    }},
+    scales: {{
+      x: {{ title: {{ display: true, text: '相对时间 (分钟，自首次异常起)' }}, beginAtZero: true }},
+      y: {{ title: {{ display: true, text: '心率跳变幅度 |ΔHR| (bpm)' }}, beginAtZero: true }}
     }}
   }}
 }});

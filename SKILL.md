@@ -1,19 +1,50 @@
 ---
-name: heartrate-sensor-parser
-description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
-metadata:
-  short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
-version: V2.3.0 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + HTML报告生成
+skill_name: heartrate-sensor-parser
+version: V2.3.3 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + HTML报告生成 + 运动负荷评估动态化 + 异常事件散点图 + 报告图表布局重组
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
 function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(含Chart.js图表+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.3.0
+# heartrate-sensor-parser 技能使用手册 V2.3.3
 
 ## 一、技能概述
 专用XOSS心率设备BLE调试日志离线解析工具。自动识别2/4/6/8字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR间期、全量HRV时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR间期突变/疑似早搏），输出标准化Excel三表+CSV+JSON+分段运动心律波动分析报告+HTML可视化报告（含Chart.js图表和双模式心内科综合分析）。
+
+### V2.3.3 优化内容（对比V2.3.2）
+报告 HTML 图表与板块布局重组，使数据呈现更符合阅读逻辑：
+
+- **HRV 两张柱状图上移**：`HTML_TEMPLATE` 中 `{hrv_charts}` 与 `{trend_chart}` 占位符顺序对调，HRV 变异性指标 (ms) / (%) 两张柱状图现位于「心率趋势（采样数据）」折线图**上方**。图表完整顺序变为：运动负荷分布环形图 → 报文分类柱状图 → HRV(ms) → HRV(%) → 心率趋势。
+- **HRV 数值面板下移**：`{hrv_metrics}` 由「运动负荷评估」摘要下方，移至「运动负荷分布图表行（charts_row1）」正下方，数值面板紧邻上方图表，便于图表与数值对照。
+- **报告板块最终顺序**：运动负荷评估 → 图表行1（负荷分布+报文分类）→ HRV 数值面板 → HRV(ms)/HRV(%) → 心率趋势 → 异常事件散点图 → 心内科综合分析。
+- 本次为纯布局调整，不改变任何计算逻辑与数值口径；图表总数仍为 6 张。
+
+### V2.3.2 优化内容（对比V2.3.1）
+将 HTML 报告中的「心律异常事件」**由表格改为散点图**，更直观地呈现异常的时段分布与剧烈程度：
+
+- **图表形态**：`build_anomaly_table()` 重构为 `build_anomaly_chart()`，输出一张 Chart.js `scatter` 散点图（canvas `anomalyChart`）。
+- **数据映射**（直接来自 JSON 的 `anomalies` 数组）：
+  - 横轴 `x`：相对时间（自首次异常起，单位分钟），由 `time` 字段 `%d/%m/%y %H:%M:%S:%f` 解析后作差得到；
+  - 纵轴 `y`：心率跳变幅度 `|hr_after - hr_before|`（bpm）；
+  - 颜色/图例：按 `type` 分色——`RR间期突变`（橙 `#f59e0b`）与 `疑似早搏`（红 `#ef4444`）；
+  - 悬停 Tooltip：显示类型、时间、心率变化 `hr_before→hr_after` 与 `detail`（如 `RR变化41.1% (680->400ms)`）。
+- **标题摘要**：卡片标题展示总起数、图表展示的明细条数与各类型计数（共 N 起，下图展示明细 M 条：RR间期突变 A 次 / 疑似早搏 B 次；N 来自 `anomaly_count` 总检测数，M 为 JSON 中 `anomalies` 明细数组长度，二者因明细数组有上限可能不一致）。
+- 报告图表总数由 5 张增至 **6 张**（运动负荷环形图、报文分类柱状图、心率趋势折线图、HRV-ms 柱状图、HRV-% 柱状图、异常事件散点图）。
+
+> **排查要点**：散点图坐标由 Python 端解析 `anomalies` 预计算为 `{x,y,...}` 对象数组后 `json.dumps` 注入；时间格式固定为 `DD/MM/YY HH:MM:SS:mmm`，若日志时间格式变化需在 `build_chart_js` 的 `strptime` 处同步调整，否则该异常点会被跳过（不影响其他图表）。
+
+### V2.3.1 修复内容（对比V2.3.0）
+修复 `generate_report.py` 中**运动负荷评估与实际区间分布不一致**的问题：
+
+1. **运动负荷评估硬编码误判**：`build_exercise_summary()` 原逻辑为 `if high_pct > 30` 否则直接写死输出 `本次运动以有氧+高强度为主（合计 31.3%）`。该写法忽略了真正占比最高的区间（如热身 62%），且把实际仅 0.36% 的高强度区间错误纳入"为主"描述，任何非高强度日志都会得到"有氧+高强度"的错误结论。
+   - **修复**：改为完全依据 `exercise_segments` 各区间占比**动态归纳**：按占比降序累加直至覆盖约 80% 总分布（至少取前两大有效区间）作为"主要区间"；并依据 `高强度及以上合计(high+extreme) ≥ 5%` 动态给出强度定性（高强度/剧烈 ↔ 以有氧为主的中等 ↔ 以热身为主的低-中等 ↔ 以静息为主的低）与高强度描述。
+   - 示例（本次 0708 日志）：`本次运动以热身、有氧区间为主（合计 93.23%），整体为以有氧为主的中等运动负荷，未出现有临床意义的高强度区间（高强度及以上合计仅 0.36%）`。
+
+2. **结论建议硬编码**：`generate_conclusions()` 的建议首条原写死 `有氧+高强度混合训练对心肺功能提升效果显著`，与修正后的评估口径矛盾。
+   - **修复**：改为按真实高强度占比动态表述（≥5% 保留原 HIIT 表述 / 有氧或热身≥30% 改为有氧耐力训练表述 / 整体偏低 改为建议逐步加量）。
+
+> **排查要点**：报告中凡涉及"运动强度定性"的结论，必须来自 `exercise_segments` 各区间的**实际占比**动态计算，不得用单一阈值分支后写死文本。主导区间应取占比降序累加覆盖 ~80% 分布的集合，而非只看某一个区间，避免漏报占比更高的区间。
 
 ### V2.3.0 新增内容（对比V2.2.4）
 **核心升级：场景自动识别 + 睡眠/运动双模式分析引擎**
@@ -63,7 +94,7 @@ agent_created: true
 2. **心率趋势折线图 — 缺少 `options:` 关键字**：`data` 对象的 `}}]` 闭合后直接写了 `responsive: true` 等配置项，缺少 `options: {{` 包裹。修复：补全 `options: {{ ... }}` 结构。
 3. **HRV ms 柱状图 — 缺少 `new Chart` 声明**：整段代码缺少 `new Chart(document.getElementById('hrvTimeChart'), {{` 和 `type: 'bar'` 声明，只有孤立的 `data:` 和 `options:` 对象。修复：补全完整的 `new Chart(...)` 调用结构。
 
-> **排查方法**：用 Node.js `new Function(js)` 对 `<script>` 标签内的 JS 做语法校验，可快速定位语法错误位置。生成的正确报告应包含 5 个 `new Chart` 实例（运动负荷环形图、报文分类柱状图、心率趋势折线图、HRV-ms 柱状图、HRV-% 柱状图）。
+> **排查方法**：用 Node.js `new Function(js)` 对 `<script>` 标签内的 JS 做语法校验，可快速定位语法错误位置。生成的正确报告应包含 6 个 `new Chart` 实例（运动负荷环形图、报文分类柱状图、心率趋势折线图、HRV-ms 柱状图、HRV-% 柱状图、异常事件散点图）。
 
 ### V2.2 升级内容（对比V2.1）
 1. 新增 `generate_report.py` — HTML可视化报告生成器，内置Chart.js图表和心内科综合分析引擎
@@ -152,9 +183,10 @@ python scripts/generate_report.py \
    - 设备信息展示
    - 数据概览卡片（报文数、心跳数、平均心率、异常事件数）
    - 运动负荷评估摘要
-   - HRV指标数值面板
-   - 6张Chart.js图表（负荷分布、报文分类、心率趋势、HRV-ms、HRV-%）
-   - 心律异常事件明细表
+   - 运动负荷分布环形图 + 报文分类柱状图（图表行1）
+   - HRV指标数值面板（位于图表行1下方，便于与图表对照）
+   - HRV-ms / HRV-% 柱状图、心率趋势折线图（图表行2）
+   - 心律异常事件散点图（横轴相对时间、纵轴|ΔHR|、按类型分色；与上方2张合计6张 Chart.js 图表）
    - **心内科综合分析**（五段式：总体评价→HRV解读→运动负荷分析→异常事件分析→结论与建议）
 
 ## 四、支持报文规格
@@ -213,6 +245,7 @@ python scripts/generate_report.py \
 4. xlsx打开乱码：确保使用Excel或WPS打开，非文本编辑器
 5. HTML图表不显示：确保浏览器可访问 cdn.jsdelivr.net（Chart.js CDN）
 6. HTML报告心内科分析为空：检查JSON文件是否包含完整的hrv_metrics字段
-7. **HTML报告全部图表空白（V2.2.2已修复）**：`build_chart_js` 函数曾存在三处JS语法错误（趋势图属性重复+缺options关键字、HRV-ms图缺new Chart声明），任一错误都会导致JS引擎中断、后续所有Chart.js代码不执行。如遇到类似问题，用 `node -e "new Function(require('fs').readFileSync('html','utf-8').match(/<script>([\s\S]*?)<\/script>/)[1])"` 做语法校验，确认生成5个 `new Chart` 实例
-8. **报文分类图 X 轴不显示（V2.2.3已修复）**：canvas 被 CSS `height: 100% !important` 锁死后 Chart.js 无法正确计算尺寸，底部刻度被裁。排查时检查 canvas 的 CSS 是否有强制 height 声明，以及 `border: { display: false }` 是否误藏了轴线。修复后 `.chart-wrap-packet` 仅设 `width: 100% !important`，不强制 height。
-9. **百分比/数值显示精度溢出（V2.2.4已修复）**：Python f-string 输出浮点数时默认不截断精度，如 `68.42999999999999%`。涉及数值显示时应主动使用 `:.2f` 等格式化说明符。
+7. **运动负荷评估文案与实际区间不符（V2.3.1已修复）**：旧版 `build_exercise_summary` 在非高强度日志下会写死输出"本次运动以有氧+高强度为主"，忽略占比更高的热身区间且误报高强度。修复后评估完全基于 `exercise_segments` 各区间实际占比动态归纳主导区间与强度。若仍发现文案与图表分布矛盾，检查 `build_exercise_summary` 的降序累加逻辑（阈值 80%、至少前两大区间）是否被改动。
+8. **HTML报告全部图表空白（V2.2.2已修复）**：`build_chart_js` 函数曾存在三处JS语法错误（趋势图属性重复+缺options关键字、HRV-ms图缺new Chart声明），任一错误都会导致JS引擎中断、后续所有Chart.js代码不执行。如遇到类似问题，用 `node -e "new Function(require('fs').readFileSync('html','utf-8').match(/<script>([\s\S]*?)<\/script>/)[1])"` 做语法校验，确认生成6个 `new Chart` 实例
+9. **报文分类图 X 轴不显示（V2.2.3已修复）**：canvas 被 CSS `height: 100% !important` 锁死后 Chart.js 无法正确计算尺寸，底部刻度被裁。排查时检查 canvas 的 CSS 是否有强制 height 声明，以及 `border: { display: false }` 是否误藏了轴线。修复后 `.chart-wrap-packet` 仅设 `width: 100% !important`，不强制 height。
+10. **百分比/数值显示精度溢出（V2.2.4已修复）**：Python f-string 输出浮点数时默认不截断精度，如 `68.42999999999999%`。涉及数值显示时应主动使用 `:.2f` 等格式化说明符。
