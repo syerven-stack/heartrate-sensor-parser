@@ -20,7 +20,15 @@ from pathlib import Path
 from collections import Counter, defaultdict
 import zipfile
 import io
+import sys
 import xml.etree.ElementTree as ET
+
+# 运动模式识别（同目录模块，导入失败则优雅降级，不影响主解析）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from classify_exercise_mode import classify_exercise_mode
+except Exception:
+    classify_exercise_mode = None
 
 # ==================== 全局常量 ====================
 CH_TARGET = "ch=2A37"
@@ -434,6 +442,24 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True):
         "心律异常事件数": len(anomalies),
     }
 
+    # ==================== 运动模式识别（启发式，心率/RR 时域） ====================
+    exercise_mode_result = {}
+    if classify_exercise_mode is not None:
+        try:
+            exercise_mode_result = classify_exercise_mode(
+                rr_full_rows, hrv_res, seg_detail, pkt_hr_stats,
+                {"start": log_start_time, "end": log_end_time}
+            )
+            # 轻量场景提示（与 generate_report.detect_scenario 口径一致）：
+            # 静息占比>95% 且 平均心率<65 → 判定为睡眠/静息，运动模式不适用
+            rest_pct = seg_detail.get("静息(<90)", {}).get("占比(%)", 0)
+            avg_hr = hrv_res.get("平均瞬时心率(bpm)", 0)
+            is_likely_sleep = (rest_pct > 95) and (avg_hr < 65)
+            exercise_mode_result["scenario_hint"] = "sleep" if is_likely_sleep else "exercise"
+            exercise_mode_result["applicable"] = not is_likely_sleep
+        except Exception:
+            exercise_mode_result = {}
+
     # ==================== 生成Excel ====================
     # Sheet1: 报文总表
     sheet1_header = ["time", "packet_len", "packet_type", "flags", "report_hr", "rr_count", "hex_raw"]
@@ -493,6 +519,7 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True):
             "anomalies": anomalies[:50],
             "anomaly_count": len(anomalies),
             "log_time_range": {"start": log_start_time, "end": log_end_time},
+            "exercise_mode": exercise_mode_result,
         }
         with open(Path(out_dir) / "分析结果.json", "w", encoding="utf-8") as jf:
             json.dump(out_json, jf, ensure_ascii=False, indent=2, default=str)

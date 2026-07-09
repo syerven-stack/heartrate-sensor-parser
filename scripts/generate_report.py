@@ -27,6 +27,26 @@ from pathlib import Path
 from datetime import datetime
 
 
+# ==================== Chart.js 本地内联（自包含，免外网） ====================
+# 将 chart.umd.min.js 内联进报告，避免依赖 CDN（预览面板/离线环境无外网时图表全空）。
+def _load_chartjs_inline():
+    """读取与本脚本同目录的 chart.umd.min.js，作为内联脚本源。"""
+    here = Path(__file__).resolve().parent
+    candidate = here / "chart.umd.min.js"
+    if candidate.exists():
+        with open(candidate, "r", encoding="utf-8") as fh:
+            return fh.read()
+    # 兜底：向上一级 scripts 目录查找
+    alt = here.parent / "scripts" / "chart.umd.min.js"
+    if alt.exists():
+        with open(alt, "r", encoding="utf-8") as fh:
+            return fh.read()
+    return None
+
+CHARTJS_INLINE = _load_chartjs_inline()
+CDN_TAG = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
+
+
 # ==================== 心内科分析引擎 ====================
 
 class CardioAnalyzer:
@@ -708,6 +728,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {data_overview}
 {exercise_summary}
 {charts_row1}
+{exercise_mode}
 {hrv_metrics}
 {hrv_charts}
 {trend_chart}
@@ -743,11 +764,13 @@ def generate_html(json_path, csv_path, output_path):
     pkt_cls = data.get("packet_classification", [])
     anomalies = data.get("anomalies", [])
     time_range = data.get("log_time_range", {})
+    mode_dict = data.get("exercise_mode", {})
 
     header = build_header(time_range, cardio["scenario"])
     device_info = build_device_info(device)
     data_overview = build_data_overview(pkt, hrv, cardio)
     exercise_summary_html = build_exercise_summary(summary, seg, cardio["scenario"])
+    exercise_mode_html = build_exercise_mode(mode_dict, cardio["scenario"])
     hrv_metrics_html = build_hrv_metrics(hrv)
     charts_row1 = build_charts_row1(cardio["scenario"])
     trend_chart = build_trend_chart()
@@ -755,7 +778,8 @@ def generate_html(json_path, csv_path, output_path):
     anomaly_table = build_anomaly_chart(anomalies, data.get("anomaly_count", 0))
     cardio_html = build_cardio_analysis(cardio, data)
 
-    chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies)
+    chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies,
+                              scenario=cardio["scenario"], mode_dict=mode_dict)
 
     page_title = "睡眠心率HRV分析报告 — XOSS X2PRO" if cardio["scenario"] == "sleep" else "心率分析报告 — XOSS X2PRO"
 
@@ -765,6 +789,7 @@ def generate_html(json_path, csv_path, output_path):
         device_info=device_info,
         data_overview=data_overview,
         exercise_summary=exercise_summary_html,
+        exercise_mode=exercise_mode_html,
         hrv_metrics=hrv_metrics_html,
         charts_row1=charts_row1,
         trend_chart=trend_chart,
@@ -774,6 +799,12 @@ def generate_html(json_path, csv_path, output_path):
         chart_js=chart_js,
         gen_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
+
+    # 将 Chart.js 内联，消除对外部 CDN 的依赖（离线/沙箱环境图表不再空白）
+    if CHARTJS_INLINE is not None:
+        html = html.replace(CDN_TAG, "<script>\n" + CHARTJS_INLINE + "\n</script>")
+    else:
+        sys.stderr.write("[WARN] chart.umd.min.js 未找到，报告仍依赖 CDN。\n")
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -930,6 +961,42 @@ def build_exercise_summary(summary, seg, scenario="exercise"):
     return f'''<div class="summary-box">
   <h3>运动负荷评估</h3>
   <p>{assessment} 建议关注恢复期心率回落速度，避免过度训练。</p>
+</div>'''
+
+
+def build_exercise_mode(mode_dict, scenario="exercise"):
+    """运动模式识别卡片。睡眠/静息场景(scenario!='exercise')直接返回空字符串，不渲染任何卡片或占位。"""
+    if scenario != "exercise":
+        return ""
+    if not mode_dict or not mode_dict.get("valid", True):
+        return ""
+
+    dom = mode_dict.get("dominant", "混合")
+    conf = mode_dict.get("confidence", 0.0)
+    low = mode_dict.get("low_confidence", False)
+    probs = mode_dict.get("probabilities", {})
+    caveat = mode_dict.get("caveat", "")
+
+    conf_pct = round(conf * 100, 1)
+    if conf >= 0.6 and not low:
+        badge_color, badge_text = "#22c55e", "高置信"
+    elif conf >= 0.4:
+        badge_color, badge_text = "#f59e0b", "中置信"
+    else:
+        badge_color, badge_text = "#ef4444", "低置信"
+
+    note = ""
+    # 非高置信（即低置信或中置信）均显示该提示；仅高置信(conf>=0.6 且 not low)时不显示
+    if low or conf < 0.6:
+        note = ('<p style="margin:8px 0 0;color:#b45309;font-size:12px">'
+                '⚠️ 各模式概率接近或信号不足，区分度有限，结果仅供参考。'
+                '真正判定需结合 GPS / 海拔 / 踏频 / 加速度计等传感器数据。</p>')
+
+    return f'''<div class="card" style="margin-bottom:16px">
+  <h2>运动模式识别：<b style="color:{badge_color}">{dom}</b> <span class="badge" style="background:{badge_color};color:#fff">{badge_text} {conf_pct}%</span></h2>
+  <p style="margin:0 0 10px;font-size:13px;color:#374151">基于逐拍 RR 间期 / 瞬时心率的时域形态学特征（间歇度、尖峰率、平稳度、双峰性、平均负荷、HR 漂移等）做<b>启发式估算</b>。</p>
+  <div class="chart-wrap" style="height:200px"><canvas id="modeChart"></canvas></div>
+  {note}
 </div>'''
 
 
@@ -1140,7 +1207,7 @@ def build_cardio_analysis(cardio, data):
 </div>'''
 
 
-def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None):
+def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None, scenario="exercise", mode_dict=None):
     """生成Chart.js脚本 - 优化版: 高清、圆环样式、悬停性能提升"""
     # 运动负荷数据
     seg_keys = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
@@ -1193,6 +1260,42 @@ def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None
 
     # 全局DPI适配：最小2x高清
     dpi_fallback = 'Math.max(window.devicePixelRatio || 2, 2)'
+
+    # 运动模式概率分布条形图（仅运动场景渲染）
+    mode_block = ""
+    if scenario == "exercise" and mode_dict and mode_dict.get("probabilities"):
+        _probs = mode_dict["probabilities"]
+        _labels = list(_probs.keys())
+        _values = [round(_probs[k] * 100, 1) for k in _labels]
+        _mode_colors = {"跑步": "#ef4444", "骑行": "#3b82f6", "游泳": "#22c55e", "爬山": "#f59e0b", "混合": "#8b5cf6"}
+        _colors = [_mode_colors.get(k, "#94a3b8") for k in _labels]
+        mode_block = f'''
+// === 运动模式概率分布条形图 ===
+new Chart(document.getElementById('modeChart'), {{
+  type: 'bar',
+  data: {{
+    labels: {json.dumps(_labels, ensure_ascii=False)},
+    datasets: [{{
+      label: '概率 (%)',
+      data: {json.dumps(_values)},
+      backgroundColor: {json.dumps(_colors)},
+      borderRadius: 4,
+      borderSkipped: false
+    }}]
+  }},
+  options: {{
+    indexAxis: 'y',
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{ callbacks: {{ label: function(ctx) {{ return ctx.raw + '%'; }} }} }}
+    }},
+    scales: {{ x: {{ beginAtZero: true, max: 100, title: {{ display: true, text: '概率 (%)' }} }} }}
+  }}
+}});
+'''
 
     return f'''
 // 全局高清适配
@@ -1425,7 +1528,7 @@ new Chart(document.getElementById('anomalyChart'), {{
     }}
   }}
 }});
-'''
+''' + mode_block
 
 
 # ==================== 主入口 ====================
