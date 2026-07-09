@@ -694,6 +694,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .hrv-item {{ text-align: center; background: #d0eaf2; border-radius: 10px; padding: 12px 4px; }}
   .hrv-item .val {{ font-size: 20px; font-weight: 700; }}
   .hrv-item .lbl {{ font-size: 11px; color: var(--text-secondary); margin-top: 4px; }}
+  .hrv-item {{ position: relative; cursor: help; }}
+  .hrv-tip {{ display: none; position: absolute; left: 50%; top: 100%; transform: translateX(-50%); margin-top: 10px; width: 270px; max-width: 80vw; background: #1f2937; color: #f9fafb; font-size: 12px; font-weight: 400; line-height: 1.65; text-align: left; padding: 10px 12px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.28); z-index: 200; pointer-events: none; }}
+  .hrv-tip::before {{ content: ""; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-bottom-color: #1f2937; }}
+  .hrv-item:hover {{ z-index: 200; }}
+  .hrv-item:hover .hrv-tip {{ display: block; }}
   .anomaly-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
   .anomaly-table th {{ text-align: left; padding: 8px 12px; background: #f9fafb; border-bottom: 2px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); }}
   .anomaly-table td {{ padding: 7px 12px; border-bottom: 1px solid var(--border); }}
@@ -734,7 +739,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {trend_chart}
 {anomaly_table}
 {cardio_analysis}
-<footer>XOSS 心率传感器解析工具 V2.3.3 · 生成于 {gen_time}</footer>
+<footer>XOSS 心率传感器解析工具 V2.4.0 · 生成于 {gen_time}</footer>
 </div>
 <script>
 {chart_js}
@@ -771,7 +776,7 @@ def generate_html(json_path, csv_path, output_path):
     data_overview = build_data_overview(pkt, hrv, cardio)
     exercise_summary_html = build_exercise_summary(summary, seg, cardio["scenario"])
     exercise_mode_html = build_exercise_mode(mode_dict, cardio["scenario"])
-    hrv_metrics_html = build_hrv_metrics(hrv)
+    hrv_metrics_html = build_hrv_metrics(hrv, cardio["hrv_interpretations"])
     charts_row1 = build_charts_row1(cardio["scenario"])
     trend_chart = build_trend_chart()
     hrv_charts = build_hrv_charts()
@@ -995,12 +1000,42 @@ def build_exercise_mode(mode_dict, scenario="exercise"):
     return f'''<div class="card" style="margin-bottom:16px">
   <h2>运动模式识别：<b style="color:{badge_color}">{dom}</b> <span class="badge" style="background:{badge_color};color:#fff">{badge_text} {conf_pct}%</span></h2>
   <p style="margin:0 0 10px;font-size:13px;color:#374151">基于逐拍 RR 间期 / 瞬时心率的时域形态学特征（间歇度、尖峰率、平稳度、双峰性、平均负荷、HR 漂移等）做<b>启发式估算</b>。</p>
-  <div class="chart-wrap" style="height:200px"><canvas id="modeChart"></canvas></div>
+  <div class="chart-wrap" style="height:300px"><canvas id="modeChart"></canvas></div>
   {note}
 </div>'''
 
 
-def build_hrv_metrics(hrv):
+def escape_html(s):
+    """转义 HTML 特殊字符，避免解读文本破坏页面结构。"""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+# 面板指标标签 → 心内科解读文本中的起始关键词（用于按指标名匹配解读）
+_HRV_TIP_KEYWORD = {
+    "SDNN (ms)": "SDNN",
+    "RMSSD (ms)": "RMSSD",
+    "SDSD (ms)": "SDSD",
+    "SDARR (ms)": "SDARR",
+    "pNN50": "pNN50",
+    "pNN20": "pNN20",
+    "CVRR": "CVRR",
+    "HRV 三角指数": "HRV三角指数",
+    "Tin (ms)": "Tin",
+    "RR 极差 (ms)": "RR极差",
+}
+
+
+def _find_hrv_tip(label, hrv_tips):
+    """根据面板指标标签，从解读列表里找出对应的完整解读文本。"""
+    kw = _HRV_TIP_KEYWORD.get(label, label)
+    for t in (hrv_tips or []):
+        if t.startswith(kw):
+            return t
+    return ""
+
+
+def build_hrv_metrics(hrv, hrv_tips=None):
+    """HRV 指标面板。每个指标悬停时显示其指标解读（取自心内科综合分析的 HRV 时域指标项解读）。"""
     items = [
         ("SDNN (ms)", hrv.get("SDNN(ms)", 0)),
         ("RMSSD (ms)", hrv.get("RMSSD(ms)", 0)),
@@ -1013,9 +1048,15 @@ def build_hrv_metrics(hrv):
         ("Tin (ms)", hrv.get("Tin(ms)", 0)),
         ("RR 极差 (ms)", hrv.get("RR极差(ms)", 0)),
     ]
-    items_html = "\n    ".join(f'<div class="hrv-item"><div class="val">{v}</div><div class="lbl">{k}</div></div>' for k, v in items)
+    parts = []
+    for k, v in items:
+        tip = _find_hrv_tip(k, hrv_tips)
+        tip_html = f'<div class="hrv-tip">{escape_html(tip)}</div>' if tip else ""
+        parts.append(f'<div class="hrv-item"><div class="val">{escape_html(v)}</div><div class="lbl">{escape_html(k)}</div>{tip_html}</div>')
+    items_html = "\n    ".join(parts)
+    hint = ' <span style="font-size:11px;font-weight:400;color:var(--text-secondary);text-transform:none;letter-spacing:0;margin-left:6px;">（鼠标悬停各指标查看解读）</span>' if hrv_tips else ""
     return f'''<div class="card" style="margin-bottom:16px">
-  <h2>HRV 心率变异性指标（全量时域）</h2>
+  <h2>HRV 心率变异性指标（全量时域）{hint}</h2>
   <div class="hrv-grid">
     {items_html}
   </div>
@@ -1534,7 +1575,7 @@ new Chart(document.getElementById('anomalyChart'), {{
 # ==================== 主入口 ====================
 
 def main():
-    parser = argparse.ArgumentParser(description="心率分析HTML报告生成器 V2.2.4")
+    parser = argparse.ArgumentParser(description="心率分析HTML报告生成器 V2.4.0")
     parser.add_argument("--json", required=True, help="分析结果JSON文件路径")
     parser.add_argument("--csv", required=True, help="心跳明细CSV文件路径")
     parser.add_argument("--out", default=None, help="输出HTML路径(默认与JSON同目录)")
