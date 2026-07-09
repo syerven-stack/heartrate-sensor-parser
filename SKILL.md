@@ -1,5 +1,8 @@
 ---
-skill_name: heartrate-sensor-parser
+name: heartrate-sensor-parser
+description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
+metadata:
+  short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
 version: V2.3.3 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + HTML报告生成 + 运动负荷评估动态化 + 异常事件散点图 + 报告图表布局重组
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
