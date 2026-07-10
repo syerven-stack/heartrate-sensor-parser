@@ -983,7 +983,11 @@ def build_exercise_mode(mode_dict, scenario="exercise"):
     caveat = mode_dict.get("caveat", "")
 
     conf_pct = round(conf * 100, 1)
-    if conf >= 0.6 and not low:
+    amb = mode_dict.get("interval_ambiguous", False)
+    if amb:
+        # 间歇难分：即便打分偏高，形态上跑步/骑行不可分，降级显示避免误导
+        badge_color, badge_text = "#f59e0b", "中置信(难分)"
+    elif conf >= 0.6 and not low:
         badge_color, badge_text = "#22c55e", "高置信"
     elif conf >= 0.4:
         badge_color, badge_text = "#f59e0b", "中置信"
@@ -997,11 +1001,19 @@ def build_exercise_mode(mode_dict, scenario="exercise"):
                 '⚠️ 各模式概率接近或信号不足，区分度有限，结果仅供参考。'
                 '真正判定需结合 GPS / 海拔 / 踏频 / 加速度计等传感器数据。</p>')
 
+    amb_note = ""
+    if amb:
+        amb_note = ('<p style="margin:8px 0 0;color:#1d4ed8;font-size:12px">'
+                    '🔍 高强度间歇运动特征：心率呈高间歇、高尖峰、无明显净漂移，'
+                    '跑步 / 骑行形态高度重叠，仅凭心率难以区分。'
+                    '建议结合踏频 / GPS / 加速度计融合判定（若为切割的子日志，漂移信号可能已被截断）。</p>')
+
     return f'''<div class="card" style="margin-bottom:16px">
   <h2>运动模式识别：<b style="color:{badge_color}">{dom}</b> <span class="badge" style="background:{badge_color};color:#fff">{badge_text} {conf_pct}%</span></h2>
   <p style="margin:0 0 10px;font-size:13px;color:#374151">基于逐拍 RR 间期 / 瞬时心率的时域形态学特征（间歇度、尖峰率、平稳度、双峰性、平均负荷、HR 漂移等）做<b>启发式估算</b>。</p>
   <div class="chart-wrap" style="height:300px"><canvas id="modeChart"></canvas></div>
   {note}
+  {amb_note}
 </div>'''
 
 

@@ -19,7 +19,7 @@
   3. variability     平稳度    ：30s 滚动窗 HR 标准差的均值(bpm)，越低越稳态      → 骑行
   4. bimodality      双峰性    ：2-means 方差缩减比(0-1)，越高越双峰           → 爬山
   5. mean_load       平均负荷  ：平均瞬时心率(bpm)，偏低且平稳                  → 游泳
-  6. drift           HR 漂移   ：逐拍 HR 对时间的线性回归斜率(bpm/h)           → 跑步(平局项)
+  6. drift           HR 漂移   ：分段均值回归斜率(bpm/h)，抗噪声、捕捉整体趋势  → 跑步；climb=会话内爬升幅度(bpm)辅助
   7. 区间分布        直接取 exercise_segments 各区间占比（透传进 features）
   8. gap_ratio       连续性    ：(有效RR报文首末跨度 - RR累加时长)/首末跨度，粗略缺口率；墙钟取RR跨度以剔除运动前后静默   → 游泳辅助
   9. drr_tail_ratio  dRR尾部比率：伪迹预筛后 P95(|dRR|)/median(|dRR|)，逐拍 RR 差分分布右尾厚重度 → 游泳/爬山上尾重、骑行/跑步平滑
@@ -214,6 +214,36 @@ def _linear_slope(hr):
     return (num / den) * 3600.0
 
 
+def _segment_slope(hr, n_seg=5):
+    """分段斜率：将 1Hz 序列均分为 n_seg 段取段均值，对段均值序列回归得 bpm/h。
+
+    相比整段线性斜率，段均值平滑了秒级噪声与间歇波动，更能反映会话整体的
+    上行/下行趋势（跑步典型：随运动持续爬升）。单位与整段斜率一致(bpm/h)。
+    """
+    n = len(hr)
+    if n < n_seg * 3:
+        return _linear_slope(hr)
+    seg_len = n // n_seg
+    means = [_mean(hr[i * seg_len:(i + 1) * seg_len]) for i in range(n_seg)]
+    # 段均值序列相邻 index 间隔 = seg_len 秒；_linear_slope 内部已按 1Hz(1秒)乘过 3600，
+    # 故真实 bpm/h = 段斜率 / seg_len（修正其"1 index=1秒"的过估）。
+    return _linear_slope(means) / seg_len
+
+
+def _climb_amplitude(hr, frac=0.33):
+    """会话内爬升幅度(bpm)：后 frac 段均值 − 前 frac 段均值。
+
+    正值表示心率随运动从低到高爬升（持续跑典型）；间歇/稳态运动通常接近 0。
+    """
+    n = len(hr)
+    if n < 10:
+        return 0.0
+    k = max(1, int(n * frac))
+    head = _mean(hr[:k])
+    tail = _mean(hr[-k:])
+    return tail - head
+
+
 # ==================== 特征计算 ====================
 def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_time_range):
     """从逐拍序列 + 汇总字段计算 9 个判别特征。返回 dict（含 valid 标志）。"""
@@ -266,8 +296,10 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
     avg_hr = hrv_metrics.get("平均瞬时心率(bpm)", _mean(inst_hr)) if isinstance(hrv_metrics, dict) else _mean(inst_hr)
     mean_load = avg_hr
 
-    # F6 HR 漂移
-    drift = _linear_slope(hr_1hz) if L >= 3 else 0.0
+    # F6 HR 漂移（V2.1：drift 改为分段斜率抗噪声；climb 为会话内爬升幅度）
+    drift_raw = _linear_slope(hr_1hz) if L >= 3 else 0.0
+    drift = _segment_slope(hr_1hz) if L >= 3 else 0.0
+    climb = _climb_amplitude(hr_1hz)
 
     # F7 区间分布（透传）
     seg = exercise_segments or {}
@@ -313,6 +345,8 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
         "bimodality": round(bimodality, 3),
         "mean_load": round(mean_load, 2),
         "drift": round(drift, 3),
+        "drift_raw": round(drift_raw, 3),
+        "climb": round(climb, 3),
         "rest_pct": rest_pct,
         "warmup_pct": warmup_pct,
         "aerobic_pct": aerobic_pct,
@@ -364,6 +398,7 @@ def classify_mode(features):
     bim = features["bimodality"]
     load = features["mean_load"]
     drift = features["drift"]
+    climb = features.get("climb", 0.0)
     gap = features["gap_ratio"]
 
     # 归一化到 0-1
@@ -415,12 +450,16 @@ def classify_mode(features):
     dominant = "混合" if low_conf else items[0][0]
     confidence = max(probabilities.values())
 
+    # 间歇运动难分标记：高间歇 + 高尖峰 + 无明显漂移 → 跑步/骑行仅凭心率难以区分
+    interval_ambiguous = bool(inter >= 12 and spike >= 12 and abs(drift) < 8)
+
     return {
         "method": "heuristic_time_domain",
         "valid": True,
         "dominant": dominant,
         "confidence": round(confidence, 4),
         "low_confidence": bool(low_conf),
+        "interval_ambiguous": interval_ambiguous,
         "margin": round(margin, 4),
         "probabilities": probabilities,
         "scores": {k: round(v, 3) for k, v in scores.items()},
