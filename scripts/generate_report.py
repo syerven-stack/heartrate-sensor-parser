@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-心率分析HTML报告生成器 V2.3.3
+心率分析HTML报告生成器 V2.4.0
 - 兼容2/4/6/8字节全规格0x2A37报文，自动过滤畸形截断数据包
 - 自动提取设备固件/SN/电量等设备参数
 - 批量计算RR间期、瞬时真实心率
@@ -1278,7 +1278,7 @@ def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None
     _min_dt = None
     for a in (anomalies or []):
         try:
-            _dt = datetime.strptime(a.get("time", ""), "%d/%m/%y %H:%M:%S:%f")
+            _dt = datetime.strptime(a.get("time", ""), "%y/%m/%d %H:%M:%S:%f")
         except Exception:
             continue
         if _min_dt is None or _dt < _min_dt:

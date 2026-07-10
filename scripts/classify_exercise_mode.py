@@ -95,7 +95,7 @@ def _softmax(d):
 
 # ==================== 时长解析 ====================
 def _parse_duration(log_time_range):
-    """从 log_time_range {start,end} 解析墙钟时长(秒)。时间格式: DD/MM/YY HH:MM:SS:fff"""
+    """从 log_time_range {start,end} 解析墙钟时长(秒)。时间格式: YY/MM/DD HH:MM:SS:fff"""
     if not log_time_range:
         return 0.0
     s = (log_time_range.get("start") or "")[:17]
@@ -103,7 +103,7 @@ def _parse_duration(log_time_range):
     if not s or not e:
         return 0.0
     try:
-        fmt = "%d/%m/%y %H:%M:%S"
+        fmt = "%y/%m/%d %H:%M:%S"
         dt0 = datetime.strptime(s, fmt)
         dt1 = datetime.strptime(e, fmt)
         if dt1 < dt0:
@@ -114,11 +114,11 @@ def _parse_duration(log_time_range):
 
 
 def _parse_two_times(s, e):
-    """解析两个报文时间字符串(格式 DD/MM/YY HH:MM:SS:fff)，返回间隔秒数；任一缺失/异常返回 0.0。"""
+    """解析两个报文时间字符串(格式 YY/MM/DD HH:MM:SS:fff)，返回间隔秒数；任一缺失/异常返回 0.0。"""
     if not s or not e:
         return 0.0
     try:
-        fmt = "%d/%m/%y %H:%M:%S"
+        fmt = "%y/%m/%d %H:%M:%S"
         dt0 = datetime.strptime(s[:17], fmt)
         dt1 = datetime.strptime(e[:17], fmt)
         if dt1 < dt0:
