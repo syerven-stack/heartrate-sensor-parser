@@ -25,6 +25,7 @@
   9. drr_tail_ratio  dRR尾部比率：伪迹预筛后 P95(|dRR|)/median(|dRR|)，逐拍 RR 差分分布右尾厚重度 → 游泳/爬山上尾重、骑行/跑步平滑
 
 附加机制（V2）：
+  * 样本时长门控：duration_min<5 → 强制 low_confidence、dominant=混合（极短样本时域特征不稳定）。
   * 信号质量门控：gap_ratio>0.2 或 double_rr_rate>0.05 → 强制 low_confidence、dominant=混合，不输出具体模式。
   * 双 RR/漏搏率 double_rr_rate：RR_i≈2×邻拍(±20%) 占比，用于门控与 dRR 预筛。
 """
@@ -300,6 +301,12 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
     drift_raw = _linear_slope(hr_1hz) if L >= 3 else 0.0
     drift = _segment_slope(hr_1hz) if L >= 3 else 0.0
     climb = _climb_amplitude(hr_1hz)
+    # 个体化归一化：以观察到的心率 P95 作为 HRmax 代理（避免单点尖峰噪声），
+    # 得到 drift_pct 单位为 1/h，表示"每小时心率爬升相当于本人最大心率的多少倍"。
+    # 该指标天然消除个体差异（HRmax 高的人 drift 绝对值大、HRmax 低的人 drift 小，比值相近），
+    # 让"上山极端爬升"与"跑步渐进爬升"的阈值适用于不同体能水平的人群。
+    hr_p95 = _percentile(hr_1hz, 95) if L >= 3 else 0.0
+    drift_pct = (drift / hr_p95) if hr_p95 > 0 else 0.0
 
     # F7 区间分布（透传）
     seg = exercise_segments or {}
@@ -346,6 +353,8 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
         "mean_load": round(mean_load, 2),
         "drift": round(drift, 3),
         "drift_raw": round(drift_raw, 3),
+        "drift_pct": round(drift_pct, 4),
+        "hr_p95": round(hr_p95, 1),
         "climb": round(climb, 3),
         "rest_pct": rest_pct,
         "warmup_pct": warmup_pct,
@@ -372,6 +381,23 @@ def classify_mode(features):
             "scores": {},
             "features": features,
             "caveat": "基于心率/RR时域特征的启发式估算，非传感器融合判定，置信度受限；真正判定需GPS/海拔/踏频/加速度计融合或标注数据",
+        }
+
+    # 样本时长门控：<5min 的极短样本，drift/climb/间歇等时域特征均不稳定 → 强制低置信
+    dur = features.get("duration_min", 0.0)
+    if dur < 5.0:
+        return {
+            "method": "heuristic_time_domain",
+            "valid": True,
+            "dominant": "混合",
+            "confidence": 0.0,
+            "low_confidence": True,
+            "poor_signal": True,
+            "signal_note": f"样本时长过短({dur:.2f}min<5min)，时域特征不稳定，无法可靠估计运动模式",
+            "probabilities": {k: 0.0 for k in ["跑步", "骑行", "游泳", "爬山"]} | {"混合": 1.0},
+            "scores": {},
+            "features": features,
+            "caveat": "样本时长过短，无法可靠估计运动模式；真正判定需更长时长记录或融合GPS/海拔/踏频/加速度计",
         }
 
     # 信号质量门控：缺口率或双RR率过高 → 强制低置信，不输出任何具体模式
@@ -407,20 +433,34 @@ def classify_mode(features):
     var_n = _clip(var / 15.0)
     bim_n = _clip(bim)
     load_n = _clip((load - 60.0) / 120.0)
-    drift_n = _clip((drift + 30.0) / 60.0)
+    # drift_n 也走个体化归一化：drift_pct 从 -0.15 (每小时下降 15% HRmax) 到 0.55
+    # (每小时上升 55% HRmax，即爬山信号起点)。上限与 uphill_extreme 起点接壤，
+    # 语义：跑步是"从静息渐进爬向 HRmax 但达不到极端"，超过 0.55 归爬山处理。
+    drift_pct = features.get("drift_pct", 0.0)
+    drift_n = _clip((drift_pct + 0.15) / 0.70)
     gap_n = _clip(gap * 5.0)
     tail = features["drr_tail_ratio"]
     tail_n = 1.0 / (1.0 + math.exp(-(tail - 8.0) / 6.0))   # soft-sigmoid：tail=8→0.5，不再硬饱和
 
-    # 加权打分（V2 重标定）
-    # 核心认知：纯心率下 爬山 与 骑行 形态高度相似（间歇/尖峰/双峰/重尾均源于强度与地形结构），
-    # 故让 爬山/骑行 共享 struct 结构分；骑行额外由中高负荷驱动，游泳由低负荷/低结构驱动，
-    # 跑步由负荷+正向漂移驱动。结构化 session 三强接近 → 诚实降级为混合。
+    # 爬山专属信号（个体化归一化，通过 drift_pct 消除 HRmax 差异）：
+    #   uphill_extreme —— drift_pct ≥0.55 (每小时爬升 ≥55% HRmax) 起效、0.80 饱和；
+    #     捕捉「地形叠加负荷」独有的极端上行速率。跑步渐进爬升实测 ≤0.52，上山样本 0.80~1.05。
+    #     阈值以"占本人 HRmax 的比例"表达，对不同心率范围的人群普适；与跑步上限留 0.03 余量。
+    #   downhill_signal —— 负 drift_pct 与高双峰性的乘积，捕捉上下山 session 特有的
+    #     「先高后低」双峰形态；平地骑行负漂 drift_pct≈0/bim<0.4 时几乎为零。
+    uphill_extreme = _clip((drift_pct - 0.55) / 0.25)
+    downhill_signal = _clip((-drift_pct - 0.05) / 0.15) * bim_n
+
+    # 加权打分（V2.4.2 重标定）
+    # struct_n（间歇+尖峰+双峰）跑步/骑行/爬山平权，不再厚此薄彼；
+    # 骑行由中高负荷主导，跑步由持续正向漂移主导，
+    # 爬山由地形专属的 uphill/downhill 信号主导，其余项作背景支撑。
     struct_n = inter_n + spike_n + bim_n
     scores = {
-        "爬山": 1.5 * struct_n + 0.8 * var_n + 0.8 * tail_n,
-        "骑行": 1.5 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n,
-        "跑步": 1.0 * struct_n + 1.5 * load_n + 1.0 * drift_n + 0.4 * tail_n,
+        "爬山": 1.0 * struct_n + 0.8 * var_n + 0.8 * tail_n
+                + 5.0 * uphill_extreme + 3.0 * downhill_signal,
+        "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n,
+        "跑步": 1.0 * struct_n + 1.5 * load_n + 2.5 * drift_n + 0.4 * tail_n,
         "游泳": 0.5 * struct_n + 0.5 * (1 - load_n) + 1.0 * (1 - bim_n) + 0.6 * gap_n + 0.6 * tail_n,
     }
 
