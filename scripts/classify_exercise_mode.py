@@ -313,8 +313,12 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
     rest_pct = seg.get("静息(<90)", {}).get("占比(%)", 0)
     warmup_pct = seg.get("热身(90-120)", {}).get("占比(%)", 0)
     aerobic_pct = seg.get("有氧(120-150)", {}).get("占比(%)", 0)
-    high_pct = seg.get("高强度(150-180)", {}).get("占比(%)", 0)
+    # high_pct 语义（V2.4.3 起）：≥75% HRmax 的时间占比 = 高强度档 + 极限档合计。
+    # 动态区间下（parse 按 hr_p95 按 ACSM 比例缩放），单档"高强度"会漏掉冲入极限档
+    # 的跑步/爬山高强度段，故取两档并集才能对齐"持续中高强度"语义。
+    high_pct_only = seg.get("高强度(150-180)", {}).get("占比(%)", 0)
     extreme_pct = seg.get("极限(>180)", {}).get("占比(%)", 0)
+    high_pct = high_pct_only + extreme_pct
 
     # F8 连续性（墙钟 vs RR累加 缺口率，粗略）
     gap_ratio = max(0.0, (real_dur_sec - sum_rr_sec) / real_dur_sec) if real_dur_sec > 0 else 0.0
@@ -451,16 +455,42 @@ def classify_mode(features):
     uphill_extreme = _clip((drift_pct - 0.55) / 0.25)
     downhill_signal = _clip((-drift_pct - 0.05) / 0.15) * bim_n
 
-    # 加权打分（V2.4.2 重标定）
+    # 跑步专属信号 sustained_high：捕捉"持续中高强度 + 高变异 + 正/近零漂移"这一跑步指纹
+    #   sustained_pct：high_pct(75-90% HRmax 心率区间占比) 从 25% 到 55% 的相对位置。
+    #     high_pct 已在 parse 阶段按个体 hr_p95 动态划分区间(ACSM 比例)，跨人群普适。
+    #     跑步实测 43~57%（4/4），骑行 ≤27.7%（3/3），中间有干净分界带。
+    #   var_running：variability(30s 窗 HR std) 从 4 到 8 的位置。稳态骑行几乎零变异
+    #     (2.5~3.6)，跑步稳态段变异明显更高（5~13），作为跑步的必要条件门槛。
+    #   drift_gate：软门槛拒绝"显著负漂移"的样本 —— 跑步物理特征是渐进爬升或最多轻微
+    #     冷却负漂。gate = clip((drift_pct+0.20)/0.10)：drift_pct ≥ -0.10 完全放行，
+    #     -0.20 完全拒绝，中间线性；实测跑步收尾段 -0.05 完全放行（保 0702-pb 冷却样本），
+    #     下山段 -0.14~-0.23 大幅衰减（挡 0711_ps-2/0712_ps-2 假阳性）。
+    #   tail_gate：软门槛拒绝"dRR 尾部厚重"的样本 —— 跑步逐拍 RR 差分分布平滑，
+    #     P95/median 比率(drr_tail_ratio)实测多在 3~40 区间；骑行/间歇型样本因大量小 dRR
+    #     叠加偶发大跳变，尾部比率飙到 50~120。gate = 1 - clip((tail-30)/30)：tail ≤30
+    #     完全放行、60 完全拒绝。这是骑行 0709-qx-2 (tail=60.7) 与跑步 0702-pb (tail=3.5)
+    #     唯一干净分离的维度（drift/var/high_pct 均有重叠）；tail_ratio 是"分布形态比率"，
+    #     不依赖 HRmax，跨人群普适。
+    #   四者相乘 sustained_pct × var_running × drift_gate × tail_gate：任一维度不满足
+    #   跑步物理特征即让 sustained_high 归零，避免骑行/下山高强度段误触发。
+    high_pct = features.get("high_pct", 0.0)
+    sustained_pct = _clip((high_pct - 25.0) / 30.0)
+    var_running = _clip((features["variability"] - 4.0) / 4.0)
+    drift_gate = _clip((drift_pct + 0.20) / 0.10)
+    tail_gate = 1.0 - _clip((features["drr_tail_ratio"] - 30.0) / 30.0)
+    sustained_high = sustained_pct * var_running * drift_gate * tail_gate
+
+    # 加权打分（V2.4.3 重标定）
     # struct_n（间歇+尖峰+双峰）跑步/骑行/爬山平权，不再厚此薄彼；
-    # 骑行由中高负荷主导，跑步由持续正向漂移主导，
+    # 骑行由中高负荷主导，跑步由 drift + 持续高强度双主导，
     # 爬山由地形专属的 uphill/downhill 信号主导，其余项作背景支撑。
     struct_n = inter_n + spike_n + bim_n
     scores = {
         "爬山": 1.0 * struct_n + 0.8 * var_n + 0.8 * tail_n
                 + 5.0 * uphill_extreme + 3.0 * downhill_signal,
         "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n,
-        "跑步": 1.0 * struct_n + 1.5 * load_n + 2.5 * drift_n + 0.4 * tail_n,
+        "跑步": 1.0 * struct_n + 1.5 * load_n + 2.5 * drift_n + 0.4 * tail_n
+                + 1.5 * sustained_high,
         "游泳": 0.5 * struct_n + 0.5 * (1 - load_n) + 1.0 * (1 - bim_n) + 0.6 * gap_n + 0.6 * tail_n,
     }
 

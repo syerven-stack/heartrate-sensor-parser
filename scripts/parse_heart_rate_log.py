@@ -178,41 +178,92 @@ def calc_hrv(rr_ms_arr):
     }
 
 # ==================== 运动负荷分段 ====================
-def split_exercise_segment(rr_rows):
-    bins = [0, 90, 120, 150, 180, 999]
-    labels = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
+def _percentile(a, p):
+    """线性插值百分位数，p∈[0,100]；a 为空返回 0.0。"""
+    n = len(a)
+    if n == 0:
+        return 0.0
+    s = sorted(a)
+    if n == 1:
+        return s[0]
+    k = (n - 1) * (p / 100.0)
+    lo = int(math.floor(k))
+    hi = int(math.ceil(k))
+    if lo == hi:
+        return s[lo]
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+# ACSM 心率区间比例：静息 <45%，热身 45-60%，有氧 60-75%，高强度 75-90%，极限 >90% HRmax
+# HRmax 参考值选取（V2.4.4）：
+#   1) 显式覆盖 hr_max_override（CLI --hr-max / _user_meta.json.hr_max）优先；
+#   2) 否则 max(HR_MAX_DEFAULT=190, hr_p95)：默认按成年人常规上限 190 兜底，
+#      只有当本次日志确实跑到过 ≥190 的心率时才用 P95 抬高。这样避免"没跑到极限
+#      的样本 hr_p95 只有 165，导致 90% 缩放后的极限门槛仅 149、稳态跑就被算成
+#      44% 极限占比"这类误读。
+#   3) 极端兜底：所有心率序列都低于 100（纯静息数据）时仍走 190，不使用 P95。
+HR_MAX_DEFAULT = 190.0
+
+ZONE_RATIOS = [(0.00, 0.45), (0.45, 0.60), (0.60, 0.75), (0.75, 0.90), (0.90, 2.00)]
+ZONE_NAMES = ("静息", "热身", "有氧", "高强度", "极限")
+
+
+# 传统 key 名（HRmax=200 的历史遗留）；实际 bpm 阈值动态生成，通过每个 value 中的
+# "阈值(bpm)" 字段暴露给下游报告，保证 iterator 语义稳定。
+LEGACY_ZONE_KEYS = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
+
+
+def split_exercise_segment(rr_rows, hr_max_override=None):
+    all_hr = [r["inst_hr"] for r in rr_rows if 30 <= r.get("inst_hr", 0) <= 220]
+    hr_p95 = _percentile(all_hr, 95) if all_hr else 0.0
+    if hr_max_override and hr_max_override >= 100:
+        # 显式覆盖：完全按调用方给的 HRmax 缩放
+        hr_max_ref = float(hr_max_override)
+        hr_max_source = "override"
+    elif hr_p95 >= 100:
+        # 默认策略：以 HR_MAX_DEFAULT(190) 兜底，若本次真跑到 ≥190 才用 P95 抬高
+        hr_max_ref = max(HR_MAX_DEFAULT, hr_p95)
+        hr_max_source = "p95" if hr_p95 >= HR_MAX_DEFAULT else "default_190"
+    else:
+        hr_max_ref = HR_MAX_DEFAULT
+        hr_max_source = "default_190_no_signal"
+    bins = [0.0] + [hi * hr_max_ref for _, hi in ZONE_RATIOS]
 
     zone_map = {}
     for row in rr_rows:
         hr = row["inst_hr"]
-        zone = None
+        idx = len(LEGACY_ZONE_KEYS) - 1
         for i in range(len(bins) - 1):
-            if bins[i] <= hr < bins[i+1]:
-                zone = labels[i]
+            if bins[i] <= hr < bins[i + 1]:
+                idx = i
                 break
-        if zone is None:
-            zone = labels[-1]
-        row["hr_zone"] = zone
-        zone_map.setdefault(zone, []).append(row)
+        key = LEGACY_ZONE_KEYS[idx]
+        row["hr_zone"] = key
+        zone_map.setdefault(key, []).append(row)
 
     total = len(rr_rows)
     seg_info = {}
-    for label in labels:
-        rows = zone_map.get(label, [])
+    for i, key in enumerate(LEGACY_ZONE_KEYS):
+        rows = zone_map.get(key, [])
         count = len(rows)
         pct = count / total * 100 if total > 0 else 0
         avg_rr = mean([r["rr_ms"] for r in rows]) if rows else 0
         avg_hr = mean([r["inst_hr"] for r in rows]) if rows else 0
-        seg_info[label] = {
+        lo = bins[i]
+        hi = bins[i + 1] if i + 1 < len(bins) else 999.0
+        seg_info[key] = {
             "心跳数": count,
             "占比(%)": round(pct, 2),
             "平均RR(ms)": round(avg_rr, 2) if rows else 0,
             "平均心率(bpm)": round(avg_hr, 2) if rows else 0,
+            "阈值下界(bpm)": round(lo, 1),
+            "阈值上界(bpm)": round(hi, 1) if hi < 900 else None,
         }
+    seg_info["_meta"] = {"hr_max_ref": round(hr_max_ref, 1), "hr_p95": round(hr_p95, 1), "hr_max_source": hr_max_source}
 
-    rest_pct = seg_info["静息(<90)"]["占比(%)"]
-    aerobic_pct = seg_info["热身(90-120)"]["占比(%)"] + seg_info["有氧(120-150)"]["占比(%)"]
-    high_pct = seg_info["高强度(150-180)"]["占比(%)"] + seg_info["极限(>180)"]["占比(%)"]
+    rest_pct = seg_info[LEGACY_ZONE_KEYS[0]]["占比(%)"]
+    aerobic_pct = seg_info[LEGACY_ZONE_KEYS[1]]["占比(%)"] + seg_info[LEGACY_ZONE_KEYS[2]]["占比(%)"]
+    high_pct = seg_info[LEGACY_ZONE_KEYS[3]]["占比(%)"] + seg_info[LEGACY_ZONE_KEYS[4]]["占比(%)"]
     summary = {
         "静息占比(%)": round(rest_pct, 2),
         "有氧运动占比(%)": round(aerobic_pct, 2),
@@ -357,7 +408,36 @@ def write_xlsx(filepath, sheets):
             zf.writestr(f"xl/worksheets/sheet{i+1}.xml", make_sheet_xml(rows))
 
 # ==================== 主处理函数 ====================
-def process_single_log(log_path, out_dir, export_csv=True, export_json=True):
+def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_max_override=None):
+    # 若未显式指定 hr_max_override，尝试从多处读取 _user_meta.json 中的 hr_max：
+    #   1) 日志所在目录及其父级（工作区随日志摆放）
+    #   2) 输出目录及其父级
+    #   3) 脚本所在目录及其父级（skill 仓库根，跨工作区共享用户偏好）
+    if hr_max_override is None:
+        script_root = Path(__file__).resolve().parent
+        candidates = [
+            Path(log_path).resolve().parent,
+            Path(log_path).resolve().parent.parent,
+            Path(out_dir).resolve(),
+            Path(out_dir).resolve().parent,
+            script_root,
+            script_root.parent,
+        ]
+        seen = set()
+        for meta_dir in candidates:
+            key = str(meta_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            meta_path = meta_dir / "_user_meta.json"
+            if meta_path.is_file():
+                try:
+                    _meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if isinstance(_meta, dict) and _meta.get("hr_max"):
+                        hr_max_override = float(_meta["hr_max"])
+                        break
+                except Exception:
+                    pass
     Path(out_dir).mkdir(exist_ok=True, parents=True)
 
     with open(log_path, "r", encoding="utf-8") as f:
@@ -424,7 +504,7 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True):
     hrv_res = calc_hrv(rr_ms_arr)
 
     # 运动负荷分段
-    seg_detail, seg_summary = split_exercise_segment(rr_full_rows)
+    seg_detail, seg_summary = split_exercise_segment(rr_full_rows, hr_max_override=hr_max_override)
 
     # 心律异常检测
     anomalies, out_of_range_count = detect_arrhythmia(rr_full_rows)
@@ -487,6 +567,8 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True):
     for k, v in seg_summary.items():
         sheet3_rows.append(["运动负荷分段", k, v])
     for zone, info in seg_detail.items():
+        if zone.startswith("_"):
+            continue
         sheet3_rows.append(["运动负荷明细", zone, f'心跳{info["心跳数"]}次, 占比{info["占比(%)"]}%, 平均心率{info["平均心率(bpm)"]}bpm'])
 
     excel_path = Path(out_dir) / "心率解析汇总.xlsx"
@@ -578,6 +660,8 @@ def generate_report(device_info, pkt_stats, pkt_stat, total_pkts, hrv, seg_detai
     lines.append(f"  {'区间':<20s} {'心跳数':>6s} {'占比':>8s} {'平均RR(ms)':>12s} {'平均心率(bpm)':>14s}")
     lines.append(f"  {'-'*20} {'-'*6} {'-'*8} {'-'*12} {'-'*14}")
     for zone, info in seg_detail.items():
+        if zone.startswith("_"):
+            continue
         lines.append(f"  {zone:<20s} {info['心跳数']:>6d} {info['占比(%)']:>7.2f}% {info['平均RR(ms)']:>12.2f} {info['平均心率(bpm)']:>14.2f}")
     lines.append("")
     lines.append("  运动负荷汇总:")
@@ -663,7 +747,7 @@ def batch_parse(folder, args):
     for f in log_files:
         print(f"正在解析: {f.name}")
         out_sub = Path(args.out) / f.stem
-        process_single_log(str(f), str(out_sub), args.csv, args.json)
+        process_single_log(str(f), str(out_sub), args.csv, args.json, hr_max_override=args.hr_max)
 
 # ==================== 入口 ====================
 def main():
@@ -673,12 +757,14 @@ def main():
     parser.add_argument("--out", default="./output", help="输出根目录")
     parser.add_argument("--csv", type=int, default=1, help="1导出CSV")
     parser.add_argument("--json", type=int, default=1, help="1导出JSON")
+    parser.add_argument("--hr-max", type=float, default=None, dest="hr_max",
+                        help="显式覆盖 HRmax（bpm），影响运动负荷区间划分；未指定时默认按 190 兜底，本次日志真跑到 ≥190 时才用 P95")
     args = parser.parse_args()
 
     if args.batch:
         batch_parse(args.batch, args)
     elif args.log:
-        process_single_log(args.log, args.out, args.csv, args.json)
+        process_single_log(args.log, args.out, args.csv, args.json, hr_max_override=args.hr_max)
     else:
         print("必须指定 --log 单文件或 --batch 文件夹参数")
 
