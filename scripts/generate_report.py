@@ -1274,6 +1274,18 @@ def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None
     # 趋势数据
     tl_json = json.dumps(trend_labels[:200])
     tv_json = json.dumps(trend_values[:200])
+    # 基线（平均瞬时心率）：与心内科分析口径一致，绘制为水平虚线；
+    # 若 hrv 未提供 avg_hr（极端情况），用趋势序列均值兜底
+    _avg_hr = hrv.get("平均瞬时心率(bpm)", 0) or 0
+    if not _avg_hr and trend_values:
+        try:
+            _avg_hr = round(sum(trend_values) / len(trend_values), 1)
+        except Exception:
+            _avg_hr = 0
+    _n_labels = len(trend_labels[:200])
+    baseline_json = json.dumps([_avg_hr] * _n_labels)
+    baseline_label = f"平均心率基线 ({_avg_hr} bpm)"
+    baseline_label_json = json.dumps(baseline_label, ensure_ascii=False)
 
     # HRV 数据
     hrv_time_values = [
@@ -1467,16 +1479,32 @@ new Chart(document.getElementById('trendChart'), {{
   type: 'line',
   data: {{
     labels: {tl_json},
-    datasets: [{{
-      label: '瞬时心率 (bpm)',
-      data: {tv_json},
-      borderColor: '#ef4444',
-      backgroundColor: 'rgba(239,68,68,0.08)',
-      fill: true,
-      tension: 0.3,
-      pointRadius: 0,
-      borderWidth: 1.5
-    }}]
+    datasets: [
+      {{
+        label: '瞬时心率 (bpm)',
+        data: {tv_json},
+        borderColor: '#ef4444',
+        backgroundColor: 'rgba(239,68,68,0.08)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 1.5,
+        order: 2
+      }},
+      {{
+        label: {baseline_label_json},
+        data: {baseline_json},
+        borderColor: '#64748b',
+        backgroundColor: 'transparent',
+        borderDash: [6, 4],
+        borderWidth: 1.2,
+        pointRadius: 0,
+        fill: false,
+        tension: 0,
+        order: 1,
+        spanGaps: true
+      }}
+    ]
   }},
   options: {{
     responsive: true,
@@ -1484,7 +1512,7 @@ new Chart(document.getElementById('trendChart'), {{
     animation: false,
     interaction: {{ mode: 'index', intersect: false }},
     plugins: {{
-      legend: {{ display: false }},
+      legend: {{ display: true, position: 'top', labels: {{ boxWidth: 24, font: {{ size: 11 }} }} }},
       tooltip: {{ animation: false, delay: 0 }}
     }},
     scales: {{

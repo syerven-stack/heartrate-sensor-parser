@@ -184,6 +184,45 @@ def _rolling_std_mean(hr, win=30):
     return _mean(vals)
 
 
+def _rolling_std_series(hr, win=30, step=5):
+    """返回 1Hz HR 的滚动窗 std 序列（每 step 秒一个点），供二阶变异 / 稳态锁定诊断。"""
+    n = len(hr)
+    if n < win:
+        return []
+    out = []
+    for i in range(0, n - win + 1, step):
+        w = hr[i:i + win]
+        out.append(_std(w))
+    return out
+
+
+def _autocorr(x, lag):
+    """去均值后的滞后 lag 自相关（Pearson 版本）。lag 越大数据点越少。"""
+    n = len(x)
+    if n <= lag + 1 or lag < 1:
+        return 0.0
+    m = _mean(x)
+    num = sum((x[i] - m) * (x[i - lag] - m) for i in range(lag, n))
+    den = sum((v - m) ** 2 for v in x)
+    return num / den if den > 1e-9 else 0.0
+
+
+def _zero_cross_rate(x):
+    """去均值后的过零率（跨零点数 / 序列长度）。噪声型序列 ~0.5，周期型序列 <0.5。"""
+    n = len(x)
+    if n < 2:
+        return 0.0
+    m = _mean(x)
+    cnt = 0
+    prev = x[0] - m
+    for i in range(1, n):
+        cur = x[i] - m
+        if (prev >= 0) != (cur >= 0):
+            cnt += 1
+        prev = cur
+    return cnt / (n - 1)
+
+
 def _bimodality_ratio(arr):
     """2-means 方差缩减比：1 - 组内方差/总方差。越接近 1 越双峰。"""
     n = len(arr)
@@ -289,6 +328,28 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
 
     # F3 平稳度（30s 滚动窗 std 均值）
     variability = _rolling_std_mean(hr_1hz, win=30) if L >= 2 else 0.0
+    # ==================== 诊断字段（V2.4.6 尝试，不进入打分）====================
+    # 目的：为骑行 vs 跑步区分寻找 HR/RR 时域上的干净分辨维度。
+    # 假设：稳态骑行是"心血管系统被锁定"，序列复杂度低、二阶变异极小；
+    #      跑步受呼吸/步频/地形调制，序列有短时相关性，二阶变异更大。
+    #
+    # D1 hr_std_of_std：30s 滚动窗 std 序列本身的 std（每 5s 步进）。稳态骑行 std 均值低且
+    #    序列平坦，std_of_std 极小；跑步 std 均值高且随呼吸/步频波动，std_of_std 显著更大。
+    # D2 hr_std_cv：std_of_std / variability（去掉均值幅度影响的相对稳定度）。
+    # D3 rr_diff_ac1：dRR 序列滞后 1 的自相关。跑步呼吸性心律不齐(RSA)使 dRR 有短时正相关；
+    #    骑行稳态 dRR 近似白噪声，ac1 ≈ 0；间歇型运动可能出现负相关。
+    # D4 dhr_zcr：|ΔHR| 序列去均值后的过零率。噪声型稳态骑行 ~0.5；跑步呼吸驱动的
+    #    准周期波动 ZCR 更低（能看到"堆积"结构）。
+    win_stds = _rolling_std_series(hr_1hz, win=30, step=5) if L >= 35 else []
+    hr_std_of_std = _std(win_stds) if len(win_stds) >= 3 else 0.0
+    hr_std_cv = (hr_std_of_std / variability) if variability > 1e-3 else 0.0
+    # dRR 序列（用 rr_ms 直接差分，粗预筛掉双 RR 伪迹后计算）
+    _drr = [rr_ms[i] - rr_ms[i - 1] for i in range(1, len(rr_ms))]
+    rr_diff_ac1 = _autocorr(_drr, 1) if len(_drr) >= 4 else 0.0
+    # |ΔHR| 序列 ZCR（HR 是 1Hz 重采样后的）
+    _dhr_abs = [abs(hr_1hz[i] - hr_1hz[i - 1]) for i in range(1, L)] if L >= 2 else []
+    dhr_zcr = _zero_cross_rate(_dhr_abs) if len(_dhr_abs) >= 4 else 0.0
+
 
     # F4 双峰性
     bimodality = _bimodality_ratio(inst_hr)
@@ -368,6 +429,11 @@ def compute_features(rr_rows, hrv_metrics, exercise_segments, packet_stats, log_
         "gap_ratio": round(gap_ratio, 3),
         "double_rr_rate": double_rr_rate,
         "drr_tail_ratio": round(drr_tail_ratio, 3),
+        # 诊断字段（V2.4.6 试验，不进入打分公式）
+        "hr_std_of_std": round(hr_std_of_std, 3),
+        "hr_std_cv": round(hr_std_cv, 3),
+        "rr_diff_ac1": round(rr_diff_ac1, 3),
+        "dhr_zcr": round(dhr_zcr, 3),
     }
 
 
@@ -471,26 +537,63 @@ def classify_mode(features):
     #     完全放行、60 完全拒绝。这是骑行 0709-qx-2 (tail=60.7) 与跑步 0702-pb (tail=3.5)
     #     唯一干净分离的维度（drift/var/high_pct 均有重叠）；tail_ratio 是"分布形态比率"，
     #     不依赖 HRmax，跨人群普适。
-    #   四者相乘 sustained_pct × var_running × drift_gate × tail_gate：任一维度不满足
-    #   跑步物理特征即让 sustained_high 归零，避免骑行/下山高强度段误触发。
+    #   sostd_gate（V2.4.6 新增）：软门槛拒绝"心率被锁定在窄区间"的稳态骑行/游泳。
+    #     hr_std_of_std 是 30s 滚动 std 序列本身的 std（每 5s 步进），衡量"变异幅度的
+    #     变异性"。稳态骑行 std 均值本身低且序列平坦，sostd 落在 1.3~3.5；跑步 std 均值
+    #     高且随呼吸/地形波动，sostd 落在 5.0~10.0，中间 3.5~5.0 是干净分界带。
+    #     gate = clip((sostd - 3.5) / 1.5)：sostd ≤3.5 完全拒绝、≥5.0 完全放行。
+    #     这是 0709-qx-1 骑行死结的救星（drift+high+tail 全在跑步区但 sostd=2.57 挡下）。
+    #     物理意义：跑步的心率被呼吸性心律不齐 + 步频扰动 + 地形起伏三重调制，30s 窗 std
+    #     天然会随时间波动；骑行稳态是"心血管系统被锁定"，std 波动极小。这个维度不依赖
+    #     HRmax，跨人群普适（阈值 3.5/5.0 是 bpm 的 std 的 std，本质是分布形态量）。
+    #   五者相乘：任一维度不满足跑步物理特征即让 sustained_high 归零。
     high_pct = features.get("high_pct", 0.0)
     sustained_pct = _clip((high_pct - 25.0) / 30.0)
     var_running = _clip((features["variability"] - 4.0) / 4.0)
     drift_gate = _clip((drift_pct + 0.20) / 0.10)
     tail_gate = 1.0 - _clip((features["drr_tail_ratio"] - 30.0) / 30.0)
-    sustained_high = sustained_pct * var_running * drift_gate * tail_gate
+    sostd_gate = _clip((features.get("hr_std_of_std", 0.0) - 3.5) / 1.5)
+    sustained_high = sustained_pct * var_running * drift_gate * tail_gate * sostd_gate
 
-    # 加权打分（V2.4.3 重标定）
+    # ==================== V2.4.7 endurance_high 耐力型高负荷通道 ====================
+    # 背景：V2.4.6 sostd_gate + var_running 双门控解决了骑行死结 0709-qx-1，但同时
+    # 挡住了极稳定"跑步机 / 平地体育场"类跑步样本（0714-pb: var=1.75, sostd=2.26，
+    # 心率序列锁定在窄区间但 high_pct=87.4）。这类样本从时域碎波看跟稳态骑行没差，
+    # 但 high_pct 87% 远超骑行天花板 46%——用宏观负荷占比作为独立救回通道。
+    #
+    # 数据支撑（20 样本）：
+    #   跑步 high_pct ∈ [51.5, 87.4]（全部 ≥50%）
+    #   骑行 high_pct ∈ [1.4, 45.9]（天花板 45.9，中位 22%）
+    #   爬山 high_pct ∈ [45.9, 79.9]（与跑步共享此特征，故爬山也吃一份）
+    # 50~80% 是干净分界带，跑步/爬山共同的"耐力型陆上运动"指纹。
+    #
+    # 物理意义：骑行受限于坐姿 + 踏频 + 车辆阻力，很难持续 ≥75% HRmax；跑步/爬山靠
+    # 全身肌群 + 支撑体重，容易长时间维持在有氧-高强度交界；同时 drift_pct ≥ -0.05
+    # 排除深度冷却负漂样本（虽 0702-pb -0.051 差点被挡，仍能通过其他通道判跑步）。
+    #
+    # 大众适用性：high_pct 是"≥75% HRmax 占比"、drift_pct 是"占 HRmax 比例"，
+    # 全是形态量/相对量，不涉及 bpm 绝对阈值，跨人群普适。
+    endurance_pct = _clip((high_pct - 50.0) / 30.0)
+    drift_nonneg = _clip((drift_pct + 0.05) / 0.15)
+    endurance_high = endurance_pct * drift_nonneg
+
+    # 加权打分（V2.4.3 重标定 + V2.4.6 sostd 扩展 + V2.4.7 endurance 补丁）
     # struct_n（间歇+尖峰+双峰）跑步/骑行/爬山平权，不再厚此薄彼；
     # 骑行由中高负荷主导，跑步由 drift + 持续高强度双主导，
     # 爬山由地形专属的 uphill/downhill 信号主导，其余项作背景支撑。
+    #
+    # V2.4.6：drift_n 通道加 sostd_gate。物理意义——只有当 30s 滚动 std 序列本身也在
+    # 波动（sostd ≥3.5）时，正漂才应被解读为"跑步渐进升温"。稳态骑行也可能因为热身/
+    # 爬坡出现正漂（0709-qx-1 drift_pct=0.463 却 sostd=2.57），此时不能让 drift 通道
+    # 单独把它推向跑步。爬山有自己的 uphill_extreme 通道（不共用 drift_n），互不干扰；
+    # 真跑步的 sostd 都 ≥5.05，gate=1 完全放行，不影响原有跑步识别。
     struct_n = inter_n + spike_n + bim_n
+    running_specific = 2.5 * drift_n * sostd_gate + 1.5 * sustained_high + 1.5 * endurance_high
     scores = {
         "爬山": 1.0 * struct_n + 0.8 * var_n + 0.8 * tail_n
-                + 5.0 * uphill_extreme + 3.0 * downhill_signal,
+                + 5.0 * uphill_extreme + 3.0 * downhill_signal + 1.0 * endurance_high,
         "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n,
-        "跑步": 1.0 * struct_n + 1.5 * load_n + 2.5 * drift_n + 0.4 * tail_n
-                + 1.5 * sustained_high,
+        "跑步": 1.0 * struct_n + 1.5 * load_n + running_specific + 0.4 * tail_n,
         "游泳": 0.5 * struct_n + 0.5 * (1 - load_n) + 1.0 * (1 - bim_n) + 0.6 * gap_n + 0.6 * tail_n,
     }
 
