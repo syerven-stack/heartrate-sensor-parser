@@ -410,16 +410,10 @@ def write_xlsx(filepath, sheets):
 # ==================== 主处理函数 ====================
 def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_max_override=None):
     # 若未显式指定 hr_max_override，尝试从多处读取 _user_meta.json 中的 hr_max：
-    #   1) 日志所在目录及其父级（工作区随日志摆放）
-    #   2) 输出目录及其父级
-    #   3) 脚本所在目录及其父级（skill 仓库根，跨工作区共享用户偏好）
+    #   1) 脚本所在目录及其父级（skill 仓库根，跨工作区共享用户偏好）
     if hr_max_override is None:
         script_root = Path(__file__).resolve().parent
         candidates = [
-            Path(log_path).resolve().parent,
-            Path(log_path).resolve().parent.parent,
-            Path(out_dir).resolve(),
-            Path(out_dir).resolve().parent,
             script_root,
             script_root.parent,
         ]
