@@ -224,19 +224,24 @@ def _zero_cross_rate(x):
 
 
 def _bimodality_ratio(arr):
-    """2-means 方差缩减比：1 - 组内方差/总方差。越接近 1 越双峰。"""
+    """2-means η² 方差缩减比：1 - SS_within / SS_total。越接近 1 越双峰。
+
+    统计学上等价于单因素方差分析的 η²（组间平方和占总平方和的比例）。
+    _var 已做 Bessel 修正，故 _var(g) * (len(g)-1) 恰好等于该组离差平方和 SS_g；
+    这里在 SS 层面直接比，比合并方差版更清爽，也无 n-2 vs n-1 的自由度归一化差异。
+    """
     n = len(arr)
     if n < 10:
         return 0.0
-    total_var = _var(arr)
-    if total_var <= 0:
+    ss_total = _var(arr) * (n - 1)
+    if ss_total <= 0:
         return 0.0
     s = sorted(arr)
     mid = n // 2
     g1 = s[:mid]
     g2 = s[mid:]
-    w = (_var(g1) * (len(g1) - 1) + _var(g2) * (len(g2) - 1)) / (n - 2)
-    return max(0.0, 1.0 - w / total_var)
+    ss_within = _var(g1) * (len(g1) - 1) + _var(g2) * (len(g2) - 1)
+    return max(0.0, 1.0 - ss_within / ss_total)
 
 
 def _linear_slope(hr):
@@ -577,7 +582,29 @@ def classify_mode(features):
     drift_nonneg = _clip((drift_pct + 0.05) / 0.15)
     endurance_high = endurance_pct * drift_nonneg
 
-    # 加权打分（V2.4.3 重标定 + V2.4.6 sostd 扩展 + V2.4.7 endurance 补丁）
+    # ==================== V2.4.8 steady_cycling 稳态骑行专属通道 ====================
+    # 背景：V2.4.7 之前骑行只吃通用项（struct + load + var + tail），是唯一没有专属
+    # 信号的模式（跑步有 sustained_high / endurance_high，爬山有 uphill_extreme /
+    # downhill_signal）。0715-qx（46min 间歇骑行、HR 全程 <135 bpm、每 5min 均值
+    # 105↔125 往返）落在 margin=0.126 的低置信边界被降级为混合，正是"骑行没有专属
+    # 通道"这个结构不对称的直接后果。
+    #
+    # 特征指纹：稳态/间歇骑行都表现为 sostd 低 + var 低 + 中低负荷。跑步/爬山的
+    # sostd 通常 ≥3.14（0712_ps-1 3.14、其余更高），只有 0714-pb (2.26) 是唯一
+    # 例外——但它 high_pct=87.4 会被 low_load_gate 完全挡下，不会误吃这份加权。
+    #
+    #   sostd_low = clip((3.5 - sostd) / 1.5)：sostd ≤2.0 满档、≥3.5 归零。
+    #   var_low = clip((4.0 - var) / 2.0)：var ≤2.0 满档、≥4.0 归零。
+    #   low_load_gate = 1 - clip((high_pct - 30) / 30)：high_pct ≤30% 完全放行、
+    #     ≥60% 完全拒绝。挡住"极稳态跑步"（0714-pb 87%）与高负荷爬山（0712_ps-1 77%）。
+    #
+    # 大众适用性：三个阈值全是分布形态量/占 HRmax 比例，不涉及 bpm 绝对值，跨人群普适。
+    sostd_low = _clip((3.5 - features.get("hr_std_of_std", 0.0)) / 1.5)
+    var_low = _clip((4.0 - features["variability"]) / 2.0)
+    low_load_gate = 1.0 - _clip((high_pct - 30.0) / 30.0)
+    steady_cycling = sostd_low * var_low * low_load_gate
+
+    # 加权打分（V2.4.3 重标定 + V2.4.6 sostd 扩展 + V2.4.7 endurance 补丁 + V2.4.8 steady_cycling）
     # struct_n（间歇+尖峰+双峰）跑步/骑行/爬山平权，不再厚此薄彼；
     # 骑行由中高负荷主导，跑步由 drift + 持续高强度双主导，
     # 爬山由地形专属的 uphill/downhill 信号主导，其余项作背景支撑。
@@ -592,7 +619,7 @@ def classify_mode(features):
     scores = {
         "爬山": 1.0 * struct_n + 0.8 * var_n + 0.8 * tail_n
                 + 5.0 * uphill_extreme + 3.0 * downhill_signal + 1.0 * endurance_high,
-        "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n,
+        "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n + 1.0 * steady_cycling,
         "跑步": 1.0 * struct_n + 1.5 * load_n + running_specific + 0.4 * tail_n,
         "游泳": 0.5 * struct_n + 0.5 * (1 - load_n) + 1.0 * (1 - bim_n) + 0.6 * gap_n + 0.6 * tail_n,
     }

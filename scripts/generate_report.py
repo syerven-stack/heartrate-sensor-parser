@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-心率分析HTML报告生成器 V2.4.0
+心率分析HTML报告生成器 V2.4.8
 - 兼容2/4/6/8字节全规格0x2A37报文，自动过滤畸形截断数据包
 - 自动提取设备固件/SN/电量等设备参数
 - 批量计算RR间期、瞬时真实心率
@@ -45,6 +45,33 @@ def _load_chartjs_inline():
 
 CHARTJS_INLINE = _load_chartjs_inline()
 CDN_TAG = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
+
+
+def _load_skill_version(default: str = "V2.4.8") -> str:
+    """从 SKILL.md front matter 的 version 字段读取当前技能版本号，供 HTML footer 显示。
+
+    优先查找脚本仓库根（scripts/ 上一级）的 SKILL.md，读取失败时回退到 default。
+    只截取版本号前缀（首个空格前），避免把长描述串写进 footer。
+    """
+    import re
+    candidates = [
+        Path(__file__).resolve().parent.parent / "SKILL.md",
+        Path(__file__).resolve().parent / "SKILL.md",
+    ]
+    for skill_path in candidates:
+        if not skill_path.exists():
+            continue
+        try:
+            text = skill_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        m = re.search(r"^version:\s*(V[\d.]+)", text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return default
+
+
+SKILL_VERSION = _load_skill_version()
 
 
 # ==================== 心内科分析引擎 ====================
@@ -739,7 +766,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {trend_chart}
 {anomaly_table}
 {cardio_analysis}
-<footer>XOSS 心率传感器解析工具 V2.4.0 · 生成于 {gen_time}</footer>
+<footer>XOSS 心率传感器解析工具 {skill_version} · 生成于 {gen_time}</footer>
 </div>
 <script>
 {chart_js}
@@ -803,6 +830,7 @@ def generate_html(json_path, csv_path, output_path):
         cardio_analysis=cardio_html,
         chart_js=chart_js,
         gen_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        skill_version=SKILL_VERSION,
     )
 
     # 将 Chart.js 内联，消除对外部 CDN 的依赖（离线/沙箱环境图表不再空白）
@@ -1615,7 +1643,7 @@ new Chart(document.getElementById('anomalyChart'), {{
 # ==================== 主入口 ====================
 
 def main():
-    parser = argparse.ArgumentParser(description="心率分析HTML报告生成器 V2.4.0")
+    parser = argparse.ArgumentParser(description="心率分析HTML报告生成器 V2.4.8")
     parser.add_argument("--json", required=True, help="分析结果JSON文件路径")
     parser.add_argument("--csv", required=True, help="心跳明细CSV文件路径")
     parser.add_argument("--out", default=None, help="输出HTML路径(默认与JSON同目录)")
