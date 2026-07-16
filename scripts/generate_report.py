@@ -718,7 +718,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .chart-wrap-packet {{ position: relative; width: 100%; flex: 1; min-height: 0; }}
   .chart-wrap-packet canvas {{ width: 100% !important; image-rendering: crisp-edges; }}
   .hrv-grid {{ display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; padding: 4px; }}
-  .hrv-item {{ text-align: center; background: #d0eaf2; border-radius: 10px; padding: 12px 4px; }}
+  .hrv-item {{ text-align: center; background: #bdedff; border-radius: 10px; padding: 12px 4px; }}
   .hrv-item .val {{ font-size: 20px; font-weight: 700; }}
   .hrv-item .lbl {{ font-size: 11px; color: var(--text-secondary); margin-top: 4px; }}
   .hrv-item {{ position: relative; cursor: help; }}
@@ -1529,7 +1529,7 @@ new Chart(document.getElementById('trendChart'), {{
         label: '瞬时心率 (bpm)',
         data: {tv_json},
         borderColor: '#ef4444',
-        backgroundColor: 'rgba(239,68,68,0.08)',
+        backgroundColor: 'rgba(239,68,68,0.2)',
         fill: true,
         tension: 0.3,
         pointRadius: 0,
