@@ -1110,7 +1110,14 @@ def build_charts_row1(scenario="exercise", exercise_mode_html=""):
     右：运动场景下放「运动模式识别」卡片；睡眠场景无运动模式，回退为「报文分类统计」。
     """
     chart_title = "睡眠心率区间分布" if scenario == "sleep" else "运动负荷分布"
-    left = f'''<div class="card">
+    if scenario == "sleep":
+        # 睡眠场景数据长尾（静息 >95%，其余档 <2%），环形图不可读，改水平条形图
+        left = f'''<div class="card">
+    <h2>{chart_title}</h2>
+    <div class="chart-wrap" style="height:320px; width:100%;"><canvas id="exerciseChart"></canvas></div>
+  </div>'''
+    else:
+        left = f'''<div class="card">
     <h2>{chart_title}</h2>
     <div class="chart-wrap" style="aspect-ratio: 1/1; width: 100%; max-width: 400px; margin: 0 auto;"><canvas id="exerciseChart"></canvas></div>
   </div>'''
@@ -1448,11 +1455,82 @@ new Chart(document.getElementById('modeChart'), {{
 }});
 '''
 
-    return f'''
-// 全局高清适配
-Chart.defaults.devicePixelRatio = {dpi_fallback};
-
-// === 运动负荷环形图 (已优化: 高清/圆环样式/悬停性能) ===
+    seg_keys_json = json.dumps(seg_keys, ensure_ascii=False)
+    seg_values_json = json.dumps(seg_values)
+    if scenario == "sleep":
+        seg_chart_block = f'''// === 睡眠心率区间分布（水平条形图，长尾分布下可读性优化） ===
+new Chart(document.getElementById('exerciseChart'), {{
+  type: 'bar',
+  data: {{
+    labels: {seg_keys_json},
+    datasets: [{{
+      label: '占比 (%)',
+      data: {seg_values_json},
+      backgroundColor: ['#22c55e','#3b82f6','#f59e0b','#ef4444','#7c3aed'],
+      borderRadius: 4,
+      borderSkipped: false,
+      barThickness: 'flex',
+      maxBarThickness: 26,
+      minBarLength: 3
+    }}]
+  }},
+  options: {{
+    indexAxis: 'y',
+    responsive: true,
+    maintainAspectRatio: false,
+    devicePixelRatio: Math.max(window.devicePixelRatio, 2),
+    animation: {{ duration: 400 }},
+    interaction: {{ mode: 'nearest', intersect: true, axis: 'y' }},
+    hover: {{ animationDuration: 120 }},
+    layout: {{ padding: {{ top: 4, bottom: 4, right: 56 }} }},
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{
+        animation: false,
+        backgroundColor: 'rgba(0,0,0,0.85)',
+        padding: 10,
+        cornerRadius: 4,
+        callbacks: {{
+          label: function(ctx) {{ return ctx.label + ': ' + ctx.raw.toFixed(2) + '%'; }}
+        }}
+      }}
+    }},
+    scales: {{
+      x: {{
+        beginAtZero: true,
+        max: 100,
+        title: {{ display: true, text: '占比 (%)', font: {{ size: 11 }} }},
+        grid: {{ color: 'rgba(0,0,0,0.05)' }},
+        ticks: {{ font: {{ size: 11 }} }}
+      }},
+      y: {{
+        grid: {{ display: false }},
+        ticks: {{ font: {{ size: 12 }} }}
+      }}
+    }}
+  }},
+  plugins: [{{
+    id: 'valueLabels',
+    afterDatasetsDraw: function(chart) {{
+      const ctx = chart.ctx;
+      const meta = chart.getDatasetMeta(0);
+      ctx.save();
+      ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillStyle = '#334155';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      meta.data.forEach(function(bar, i) {{
+        const v = chart.data.datasets[0].data[i];
+        if (v == null) return;
+        ctx.fillText(v.toFixed(2) + '%', bar.x + 6, bar.y);
+      }});
+      ctx.restore();
+    }}
+  }}]
+}});
+'''
+    else:
+        seg_chart_block = f'''// === 运动负荷环形图 (已优化: 高清/圆环样式/悬停性能) ===
 new Chart(document.getElementById('exerciseChart'), {{
   type: 'doughnut',
   data: {{
@@ -1518,6 +1596,13 @@ new Chart(document.getElementById('exerciseChart'), {{
     }}
   }}
 }});
+'''
+
+    return f'''
+// 全局高清适配
+Chart.defaults.devicePixelRatio = {dpi_fallback};
+
+{seg_chart_block}
 {packet_block if show_packet else ""}
 // === 心率趋势折线图 ===
 new Chart(document.getElementById('trendChart'), {{

@@ -3,17 +3,47 @@ name: heartrate-sensor-parser
 description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
 metadata:
   short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
-version: V2.4.8 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HTML报告(Chart.js自包含) + 心内科综合分析
+version: V2.4.9 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HTML报告(Chart.js自包含) + 心内科综合分析
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
 function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、运动模式细分识别（骑行/跑步/游泳/爬山/混合）、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(Chart.js内联+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.4.8
+# heartrate-sensor-parser 技能使用手册 V2.4.9
 
 ## 一、技能概述
 专用 XOSS 心率设备 BLE 调试日志离线解析工具。自动识别 2/4/6/8 字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR 间期、全量 HRV 时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR 间期突变/疑似早搏），**对运动场景额外做运动模式细分识别（骑行/跑步/游泳/爬山/混合）**，输出标准化 Excel 三表 + CSV + JSON + 分段运动心律波动分析报告 + HTML 可视化报告（**Chart.js 已内联，离线/沙箱预览可直接出图，无需联网**）。
+
+### V2.4.9 核心变更（对比 V2.4.8）
+
+**为睡眠场景 HTML 报告注入「睡眠结构与质量评价」卡片，并移除该场景下无意义的运动图表**。V2.4.8 前睡眠报告仍带「睡眠心率区间分布」（>98% 静息、其余分档 <2% 的长尾图）和「报文分类统计」（协议侧信息，与临床解读无关），观感嘈杂。V2.4.9 用 HRV 代理法输出更贴近临床的睡眠结构可视化。
+
+1. **新增脚本 `scripts/inject_sleep_structure.py`**（stdlib only，独立于 `generate_report.py`，幂等注入）：
+   - 输入：`{out-dir}/心跳明细.csv`；输出：`{out-dir}/sleep_structure_report.md`，并原地改写 `heart_rate_report.html`。
+   - 30 s 分帧 + 5 min 滑窗（HR/RMSSD/HR 波动率），基于个人夜间基线 HR 与 RMSSD 分位划 Deep(N3) / Light(N1-N2) / REM / Wake 四期。
+   - 孤立 Wake 段合并阈值 `min_wake_epochs=6`（<3 min 视为浅睡）。**不做 RR 突变过滤**（`beats = beats_raw`）：RR 突变通常对应体位改变/短暂觉醒的真实生理信号，过滤会低估觉醒次数。
+   - 打分：TST / SE / 深睡占比 / REM 占比 / 觉醒次数 / RMSSD / 夜间 HR 七维度加权 → 0-100 分 → A/B/C/D/E 等级。
+   - 注入 `<!-- SLEEP_STRUCTURE_BEGIN/END -->` 之间为独立块，可重复运行覆盖旧块。
+
+2. **卡片布局**（h2 内嵌评分胶囊 + 双图并排 + 方法说明）：
+   - 标题行 `<h2>睡眠结构与质量评价 [79 B（良好）]</h2>`（胶囊嵌在标题里，评分 + 等级两项，颜色随等级变化）。
+   - 左「分期时长分布」水平条形图（1fr），右「睡眠分期时序图（总时间 X.X 小时）」阶梯折线（1.4fr）+ 图例（深睡 N3 / 浅睡 N1/N2 / REM / 清醒 四项色块）。窄屏（≤900 px）自动堆叠为单列，canvas 容器 `min-width:0` 防止溢出。
+   - 图表高度 280 px，网格线 `rgba(0,0,0,0.05~0.06)`、刻度 `#475569`，与页面其他浅色图表统一。
+   - 卡片位置：紧跟 `summary-box`（睡眠心率总体评估）之后，在原「睡眠心率区间分布」网格之前。
+
+3. **自动剥离睡眠场景下无意义的图表**：注入器会同时删除 `<div class="grid-2">` 内的「睡眠心率区间分布」（`exerciseChart`）与「报文分类统计」（`packetChart`）DOM 及对应 `new Chart(...)` 初始化。**正则关键点**：Chart 初始化的结束锚点必须精确到 `\}\]\s*\}\);`（外层 `plugins: [{...}]});`），只匹配 `\}\);` 会把 `plugins.afterDatasetsDraw` 内层的 `});` 当成结尾，导致外层 `}]}` 残留为孤儿 JS，浏览器解析报错后**该 `<script>` 剩下的图表全部不再渲染**。V2.4.9 的正则已修正。
+
+4. **推荐调用顺序**（睡眠日志）：
+   ```bash
+   python scripts/parse_heart_rate_log.py --log heart_rate_0706-sp.log --out output/0706-sp
+   python scripts/generate_report.py --json output/0706-sp/分析结果.json \
+       --csv output/0706-sp/心跳明细.csv --out output/0706-sp/heart_rate_report.html
+   python scripts/inject_sleep_structure.py --out-dir output/0706-sp
+   ```
+   运动场景不需要执行第三步。
+
+5. **不改动 `generate_report.py`**：保持"生成器输出通用报告 → 注入器按场景增补/裁剪"的分工，避免与 V2.4.8 的运动模式改动交织。
 
 ### V2.4.8 核心变更（对比 V2.4.7）
 
@@ -256,6 +286,9 @@ python scripts/generate_report.py \
   --json output/分析结果.json \
   --csv output/心跳明细.csv \
   --out output/heart_rate_report.html
+
+# Step 3（仅睡眠场景）：注入「睡眠结构与质量评价」卡片，剥离运动图表
+python scripts/inject_sleep_structure.py --out-dir output
 ```
 
 ### 2. 极简命令（仅解析，产物落到默认 ./output）
@@ -461,6 +494,7 @@ python scripts/generate_report.py \
 12. 百分比/数值显示精度溢出（V2.2.4 已修复）：数值显示统一 `:.2f` 格式化。
 
 ## 九、历史变更附录（精简）
+- **V2.4.9**：新增 `scripts/inject_sleep_structure.py`（stdlib）—— 睡眠场景 HTML 追加「睡眠结构与质量评价」卡片（HRV 代理 hypnogram + 分期时长 + 0-100 评分 A/B/C/D/E 等级），并自动剥离该场景下无意义的「睡眠心率区间分布」「报文分类统计」两图。修复正则删除 Chart 初始化时结束锚点太浅导致 `plugins:[{}]});` 尾巴残留、拖垮同一 `<script>` 后续所有图表的 bug（结束锚点必须匹配到 `}]});`）。默认 `min_wake_epochs=6`、不过滤 RR 突变以保留真实觉醒信号。
 - **V2.4.8**：① 新增骑行专属通道 `steady_cycling = clip((3.5-sostd)/1.5) * clip((4.0-var)/2.0) * (1 - clip((high_pct-30)/30))`，骑行得分 `+1.0 * steady_cycling`。② 补齐"跑步/爬山有专属通道但骑行只吃公用池"的结构不对称：跑步有 sustained_high / endurance_high，爬山有 uphill_extreme / downhill_signal，V2.4.8 前骑行只有通用项。③ 三个门控（sostd_low × var_low × low_load_gate）互相锁死："低二阶变异 + 低碎波 + 中低负荷"三条同时满足才起效，物理上恰好对应"骑行的坐姿+踏频锁定+阻力天花板"完整定义。④ 阈值 sostd 2.0/3.5、var 2.0/4.0、high_pct 30/60 均为分布形态量，跨人群普适。⑤ 回归结果：跑步 5/5 保持（分数 100% 相同——low_load_gate 挡住 0714-pb 跑步机稳跑），爬山 4/4 保持（0712_ps-2 骑行分从 2.83→3.01 但爬山 4.32 稳压），骑行 5/7→7/8（0629-qx 0.42→0.59、0702-qx-2 从 LC→0.57、0714-qx 从 LC→0.55、0715-qx 从 LC→0.47 全部救回；只留 0709-qx-2 tail 60.7 高间歇仍 LC）。
 - **V2.4.7**：① 新增独立通道 `endurance_high = clip((high_pct-50)/30) * clip((drift_pct+0.05)/0.15)`，跑步得分 `+1.5 * endurance_high`、爬山 `+1.0 * endurance_high`（骑行不加，天花板 <50% 天然为零）。② 关键设计——不套 sostd/var 门控，独立于 sustained_high，专门救"心率锁定在窄区间但持续高负荷"的极稳态跑步（室外平地体育场 / 跑步机场景）。③ 阈值 50/80/-0.05/+0.10 均为占 HRmax 比例，跨人群普适。④ 回归结果：跑步 4/5 → 5/5（0714-pb 从骑行 0.43 → 跑步 0.56），爬山 4/4 不倒退，骑行 5/7 硬判保持（新增 0714-qx 稳态低负荷正确降级 LC）。⑤ 反例边界写入 6.5：若 high_pct<50% + var<4 + sostd<5 三条都成立，纯心率无解，需融合加速度计。
 - **V2.4.6**：① 新增诊断特征 `hr_std_of_std`（30s 滚动 std 序列本身的 std，每 5s 步进），衡量"变异幅度的变异性"；跑步 ≥5、稳态骑行 ≤3.5，中间 3.5~5.0 干净分界带。② 新增五门控 `sostd_gate = clip((sostd-3.5)/1.5)`，扩展 sustained_high 从四门控到五门控。③ **跑步得分公式变更**：`drift_n` 通道也套上 `sostd_gate`，避免稳态骑行带正漂移时被 drift 单臂推向跑步（此前 V2.4.5 无法救 0709-qx-1）。④ 回归结果——跑步 4/4、爬山 4/4 保持不倒退；骑行从 0/6 硬判 → 5/6 硬判（0629 / 0701 / 0702-qx-1 / 0703 / 0709-qx-1 全部救回），只留 0702-qx-2（2min 低负荷）和 0709-qx-2（高间歇 tail 60）诚实降级为混合 LC。⑤ 阈值 3.5/5.0 是 bpm 的 std 的 std，本质是分布形态量，不涉及 HRmax 绝对值缩放，跨人群普适。⑥ 同步透传 `hr_std_cv / rr_diff_ac1 / dhr_zcr` 三个候选诊断字段，仅供未来调参。
