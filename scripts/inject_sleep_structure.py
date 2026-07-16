@@ -129,33 +129,54 @@ def add_sliding(beats, epochs, win_sec=300):
         ep['hr_win_std'] = statistics.pstdev(hrs) if len(hrs) > 1 else 0.0
 
 # ---------- Classifier ----------
+def _pct(vals, p):
+    if not vals:
+        return 0.0
+    v = sorted(vals)
+    k = (len(v) - 1) * p
+    lo = int(k); hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
 def classify(epochs):
     valid = [ep for ep in epochs if ep['has_data']]
     if not valid:
         return None
     all_hr = [ep['hr_win_mean'] for ep in valid]
     hr_base = statistics.median(all_hr)
+    hr_p10 = _pct(all_hr, 0.10)
+    hr_p90 = _pct(all_hr, 0.90)
+    # 自适应阈值（借鉴 sleep_analysis.py 分位差公式）
+    DEEP_DROP = 0.35 * (hr_base - hr_p10)   # 深睡下沉幅度（相对基线）
+    AWAKE_DELTA = max(6.0, 0.45 * (hr_p90 - hr_base))  # 觉醒抬升下限
     rmssd_sorted = sorted(ep['rmssd5'] for ep in valid)
     def q(p): return rmssd_sorted[min(int(p * len(rmssd_sorted)), len(rmssd_sorted) - 1)]
     q75 = q(0.75); q40 = q(0.40)
+    rmssd_med = statistics.median(ep['rmssd5'] for ep in valid)
     med_hr_std = statistics.median(ep['hr_win_std'] for ep in valid)
+
+    # 供 metrics 使用
+    for ep in epochs:
+        ep['_hr_base'] = hr_base
 
     for ep in epochs:
         if not ep['has_data']:
             ep['stage'] = 'Gap'
             continue
         hr = ep['hr_win_mean']; rm = ep['rmssd5']; std = ep['hr_win_std']
-        # Wake：epoch 内峰值+波动都异常（觉醒事件），或滑窗均值/波动都偏高
+        # Wake：epoch 内峰值+波动都异常（短事件），或"持续 HR 抬升 + HRV 抑制"
         epoch_max = ep.get('hr_max') or 0
         epoch_std = ep.get('hr_std') or 0
         wake_event = epoch_max > hr_base + 35 and epoch_std > 15
-        sustained_wake = hr > hr_base + 8 or (hr > hr_base + 5 and std > med_hr_std * 2.0)
+        sustained_wake = (
+            (hr > hr_base + AWAKE_DELTA and rm < 0.8 * rmssd_med) or
+            (hr > hr_base + 5 and std > med_hr_std * 2.0 and rm < 0.9 * rmssd_med)
+        )
         if wake_event or sustained_wake:
             ep['stage'] = 'Wake'
-        # Deep：HR低于基线，RMSSD高，HR波动小
-        elif hr < hr_base - 2 and rm >= q75 and std <= med_hr_std * 1.2:
+        # Deep：HR 低于基线 ≥ DEEP_DROP，RMSSD 高，HR 波动小
+        elif hr <= hr_base - DEEP_DROP and rm >= q75 and std <= med_hr_std * 1.2:
             ep['stage'] = 'Deep'
-        # REM：HR接近基线，HR波动偏大，RMSSD不在最高分位
+        # REM：HR 接近基线，HR 波动偏大，RMSSD 不在最高分位
         elif abs(hr - hr_base) < 5 and std > med_hr_std * 1.3 and rm < q75:
             ep['stage'] = 'REM'
         else:
@@ -270,6 +291,13 @@ def compute_metrics(epochs, beats):
     hr_min = min(valid_hrs) if valid_hrs else 0.0
     hr_max = max(valid_hrs) if valid_hrs else 0.0
 
+    # 夜间 HR dip：睡眠均 HR 相对全夜 HR 基线的下降幅度
+    hr_base_full = epochs[0].get('_hr_base') if epochs else None
+    if hr_base_full is None and epochs:
+        _all = [ep['hr_win_mean'] for ep in epochs if ep['has_data']]
+        hr_base_full = statistics.median(_all) if _all else sleep_hr_mean
+    hr_dip = ((hr_base_full - sleep_hr_mean) / hr_base_full) if hr_base_full else 0.0
+
     return {
         'onset_idx': onset,
         'offset_idx': offset,
@@ -289,6 +317,8 @@ def compute_metrics(epochs, beats):
         'sleep_hr_max': hr_max,
         'rmssd': sleep_rmssd,
         'sdnn': sleep_sdnn,
+        'hr_base_full': hr_base_full,
+        'hr_dip': hr_dip,
         'counts': counts,
     }
 
@@ -342,10 +372,17 @@ def score(m):
     dims.append(('RMSSD（迷走张力）', s, 10, f'{rm:.1f} ms', '≥60 ms 满分'))
 
     sd = m['sdnn']
-    if sd >= 80: s = 5
-    elif sd >= 50: s = 4
-    else: s = 2
-    dims.append(('SDNN（整体 HRV）', s, 5, f'{sd:.1f} ms', '≥80 ms 满分'))
+    if sd >= 80: s = 3
+    elif sd >= 50: s = 2
+    else: s = 1
+    dims.append(('SDNN（整体 HRV）', s, 3, f'{sd:.1f} ms', '≥80 ms 满分'))
+
+    # 夜间心率下降 dip：睡眠均 HR 相对全夜基线的下降幅度，反映自主神经恢复
+    dip = m.get('hr_dip', 0.0) * 100.0  # 百分比
+    if dip >= 8: s = 2
+    elif dip >= 4: s = 1
+    else: s = 0
+    dims.append(('夜间心率下降 dip', s, 2, f'{dip:.1f}%', '≥8% 满分'))
 
     total = sum(d[1] for d in dims)
     if total >= 85: grade = 'A（优秀）'
@@ -429,6 +466,13 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
     stage_counts = m['counts']
     stage_labels = [STAGE_ZH[k] for k in STAGES]
     stage_mins = [stage_counts[k] * 0.5 for k in STAGES]
+    _tst = stage_counts['Deep'] + stage_counts['Light'] + stage_counts['REM']
+    _tib_local = _tst + stage_counts['Wake']
+    def _pct_stage(k):
+        if k == 'Wake':
+            return (stage_counts[k] / _tib_local * 100.0) if _tib_local else 0.0
+        return (stage_counts[k] / _tst * 100.0) if _tst else 0.0
+    stage_pcts = [round(_pct_stage(k), 1) for k in STAGES]
     stage_colors_arr = [STAGE_COLORS[k] for k in STAGES]
 
     tst_h = m['tst_min']/60.0
@@ -463,7 +507,7 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
   </h2>
   <div class="sleep-chart-grid">
     <div>
-      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">分期时长分布</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">分期时长分布（min）/ 有效睡眠时间（{m["tst_min"]:.0f} min）</div>
       <div style="height:280px;width:100%;"><canvas id="stageBarChart"></canvas></div>
     </div>
     <div>
@@ -539,6 +583,7 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
       }}
     }}
   }});
+  const stagePcts = {json.dumps(stage_pcts)};
   new Chart(document.getElementById('stageBarChart'), {{
     type: 'bar',
     data: {{
@@ -559,14 +604,14 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
         legend: {{ display:false }},
         tooltip: {{
           callbacks: {{
-            label: ctx => `${{ctx.parsed.x.toFixed(0)}} min`
+            label: ctx => `${{ctx.parsed.x.toFixed(0)}} min（${{stagePcts[ctx.dataIndex]}}%）`
           }}
         }}
       }},
       scales: {{
         x: {{
           beginAtZero: true,
-          ticks: {{ color: '#475569', font: {{ size: 10 }}, callback: v => v + ' min' }},
+          ticks: {{ color: '#475569', font: {{ size: 10 }} }},
           grid: {{ display: true, color: 'rgba(0,0,0,0.05)', drawBorder: false }},
           border: {{ display: true, color: 'rgba(0,0,0,0.05)' }}
         }},

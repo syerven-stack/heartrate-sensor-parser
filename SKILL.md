@@ -3,17 +3,57 @@ name: heartrate-sensor-parser
 description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
 metadata:
   short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
-version: V2.4.9 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HTML报告(Chart.js自包含) + 心内科综合分析
+version: V2.5.1 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HTML报告(Chart.js自包含) + 心内科综合分析
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
 function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、运动模式细分识别（骑行/跑步/游泳/爬山/混合）、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(Chart.js内联+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.4.9
+# heartrate-sensor-parser 技能使用手册 V2.5.1
 
 ## 一、技能概述
 专用 XOSS 心率设备 BLE 调试日志离线解析工具。自动识别 2/4/6/8 字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR 间期、全量 HRV 时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR 间期突变/疑似早搏），**对运动场景额外做运动模式细分识别（骑行/跑步/游泳/爬山/混合）**，输出标准化 Excel 三表 + CSV + JSON + 分段运动心律波动分析报告 + HTML 可视化报告（**Chart.js 已内联，离线/沙箱预览可直接出图，无需联网**）。
+
+### V2.5.1 核心变更（对比 V2.5.0）
+
+**「分期时长分布」图 UI 微调**，让占比信息与 TST 参考量一目了然，不额外占用画布：
+
+1. **标题追加 TST 参照** —— 图表标题从「分期时长分布」改为「分期时长分布（min）/有效睡眠时间（{tst} min）」，让读者在同一行看到当前占比的分母（TST），不需要往上翻胶囊或标题栏对照。
+2. **X 轴刻度去 min 后缀** —— 单位统一放到标题括号里，刻度只显示数字，避免每个 tick 后重复 "min" 造成的视觉噪音。
+3. **Tooltip 补百分比** —— 悬停任一条时显示 `{分钟} min（{占比}%）`，占比口径与主表一致：Deep/Light/REM 分母 = TST，Wake 分母 = TIB。
+4. **柱右侧不打数值标签** —— 之前尝试过 `stageValueLabels` afterDatasetsDraw 插件在柱右侧写 `min · %`，实测柱宽有限（左列 1fr），文字容易越界或与相邻柱重叠，改回 hover-only。
+
+### V2.5.0 核心变更（对比 V2.4.9）
+
+**吸收 `sleep_analysis.py`（外部脚本）三点思路，让 `inject_sleep_structure.py` 分期与评分更自适应**：
+
+1. **Deep 阈值自适应** —— 原来的硬编码 `hr < base - 2 bpm` 改为 `hr <= base - DEEP_DROP`，其中 `DEEP_DROP = 0.35 × (median - P10)`。个体夜间 HR 波动幅度大的人（如年轻/低静息 HR），DEEP_DROP 会自动放宽；波动小的人门槛自动收紧。避免固定 bpm 阈值在不同 HRmax/静息 HR 个体上失真。
+
+2. **Wake 加 RMSSD 抑制作为联合条件** —— 持续型 Wake 从「HR 抬高 8 bpm」的单条规则改为两条 or：
+   - `hr > base + AWAKE_DELTA 且 rm < 0.8 × RMSSD_MED`（AWAKE_DELTA=max(6, 0.45×(P90-median))，也是分位差自适应）
+   - `hr > base + 5 且 hr_std > 2×med_hr_std 且 rm < 0.9 × RMSSD_MED`
+   避免把 REM 期的高波动误判为 Wake（REM 时 RMSSD 通常正常或偏高，加抑制项后自然排除）。短事件通道（`epoch_max > base+35 且 epoch_std > 15`）保留。
+
+3. **评分加「夜间心率下降 dip」维度** —— `dip = (H_full - H_sleep) / H_full`，反映睡眠期相对全夜基线的心率下降幅度。SDNN 从 5 分降到 3 分，dip 补 2 分，总分仍 100。评分标准：dip≥8% 满分 2 分、≥4% 得 1 分、否则 0 分。
+
+**回归结果**（0706-sp 睡眠日志，仓库内唯一睡眠样本）：
+
+| 指标 | V2.4.9 | V2.5.0 | 变化 |
+|---|---|---|---|
+| TIB | 474 min | 471 min | -3 |
+| TST | 447 min | 437 min | -10 |
+| SE | 94.2% | 92.8% | -1.4 pp |
+| 深睡占比 | 11.4% (未达标) | **13.7% (达标)** | +2.3 pp |
+| REM 占比 | 5.5% | 5.6% | 持平 |
+| 觉醒次数 | 6 | **7** | +1（Wake 检测更精细） |
+| WASO | 28 min | 34 min | +6 |
+| dip | — | -0.4% | 新增维度 |
+| 评分 | **79/100 B** | **82/100 B** | +3 |
+
+分数变化溯源：深睡从 10 分（未达标）升到 15 分（达标区），SDNN 从 5 分降到 3 分，dip 得 0 分，净 +3。三项改动各司其职，未互相冲抵。
+
+**幂等性与鲁棒性**：脚本可重复执行（HTML 内 `<!-- SLEEP_STRUCTURE_BEGIN/END -->` 锚点保证不叠加），对非睡眠日志（如 0714-qx 运动数据）也能跑通不崩，只是分期结果无临床意义（预期行为）。
 
 ### V2.4.9 核心变更（对比 V2.4.8）
 
@@ -494,6 +534,8 @@ python scripts/generate_report.py \
 12. 百分比/数值显示精度溢出（V2.2.4 已修复）：数值显示统一 `:.2f` 格式化。
 
 ## 九、历史变更附录（精简）
+- **V2.5.1**：「分期时长分布」图 UI 微调 —— 标题改为「分期时长分布（min）/有效睡眠时间（{tst} min）」，X 轴刻度去 min 后缀，tooltip 加百分比（Deep/Light/REM 分母=TST，Wake 分母=TIB）。不改分期/评分算法。
+- **V2.5.0**：`inject_sleep_structure.py` 三点自适应改进 —— (1) Deep 阈值从固定 `-2 bpm` 改为 `DEEP_DROP=0.35×(median-P10)` 分位差自适应；(2) Wake 持续型判定加 `RMSSD < 0.8×RMSSD_MED` 抑制条件，避免 REM 高波动误判；(3) 评分新增「夜间心率下降 dip=(H_full-H_sleep)/H_full」维度（2 分，SDNN 从 5 分降到 3 分补齐）。0706-sp 回归：深睡 11.4%→13.7% 进入达标区，觉醒 6→7 次识别更精细，总分 79→82 分（等级 B 保持）。
 - **V2.4.9**：新增 `scripts/inject_sleep_structure.py`（stdlib）—— 睡眠场景 HTML 追加「睡眠结构与质量评价」卡片（HRV 代理 hypnogram + 分期时长 + 0-100 评分 A/B/C/D/E 等级），并自动剥离该场景下无意义的「睡眠心率区间分布」「报文分类统计」两图。修复正则删除 Chart 初始化时结束锚点太浅导致 `plugins:[{}]});` 尾巴残留、拖垮同一 `<script>` 后续所有图表的 bug（结束锚点必须匹配到 `}]});`）。默认 `min_wake_epochs=6`、不过滤 RR 突变以保留真实觉醒信号。
 - **V2.4.8**：① 新增骑行专属通道 `steady_cycling = clip((3.5-sostd)/1.5) * clip((4.0-var)/2.0) * (1 - clip((high_pct-30)/30))`，骑行得分 `+1.0 * steady_cycling`。② 补齐"跑步/爬山有专属通道但骑行只吃公用池"的结构不对称：跑步有 sustained_high / endurance_high，爬山有 uphill_extreme / downhill_signal，V2.4.8 前骑行只有通用项。③ 三个门控（sostd_low × var_low × low_load_gate）互相锁死："低二阶变异 + 低碎波 + 中低负荷"三条同时满足才起效，物理上恰好对应"骑行的坐姿+踏频锁定+阻力天花板"完整定义。④ 阈值 sostd 2.0/3.5、var 2.0/4.0、high_pct 30/60 均为分布形态量，跨人群普适。⑤ 回归结果：跑步 5/5 保持（分数 100% 相同——low_load_gate 挡住 0714-pb 跑步机稳跑），爬山 4/4 保持（0712_ps-2 骑行分从 2.83→3.01 但爬山 4.32 稳压），骑行 5/7→7/8（0629-qx 0.42→0.59、0702-qx-2 从 LC→0.57、0714-qx 从 LC→0.55、0715-qx 从 LC→0.47 全部救回；只留 0709-qx-2 tail 60.7 高间歇仍 LC）。
 - **V2.4.7**：① 新增独立通道 `endurance_high = clip((high_pct-50)/30) * clip((drift_pct+0.05)/0.15)`，跑步得分 `+1.5 * endurance_high`、爬山 `+1.0 * endurance_high`（骑行不加，天花板 <50% 天然为零）。② 关键设计——不套 sostd/var 门控，独立于 sustained_high，专门救"心率锁定在窄区间但持续高负荷"的极稳态跑步（室外平地体育场 / 跑步机场景）。③ 阈值 50/80/-0.05/+0.10 均为占 HRmax 比例，跨人群普适。④ 回归结果：跑步 4/5 → 5/5（0714-pb 从骑行 0.43 → 跑步 0.56），爬山 4/4 不倒退，骑行 5/7 硬判保持（新增 0714-qx 稳态低负荷正确降级 LC）。⑤ 反例边界写入 6.5：若 high_pct<50% + var<4 + sostd<5 三条都成立，纯心率无解，需融合加速度计。
