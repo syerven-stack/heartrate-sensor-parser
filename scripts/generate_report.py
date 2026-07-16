@@ -760,7 +760,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 {data_overview}
 {exercise_summary}
 {charts_row1}
-{exercise_mode}
 {hrv_metrics}
 {hrv_charts}
 {trend_chart}
@@ -804,14 +803,16 @@ def generate_html(json_path, csv_path, output_path):
     exercise_summary_html = build_exercise_summary(summary, seg, cardio["scenario"])
     exercise_mode_html = build_exercise_mode(mode_dict, cardio["scenario"])
     hrv_metrics_html = build_hrv_metrics(hrv, cardio["hrv_interpretations"])
-    charts_row1 = build_charts_row1(cardio["scenario"])
+    charts_row1 = build_charts_row1(cardio["scenario"], exercise_mode_html)
     trend_chart = build_trend_chart()
     hrv_charts = build_hrv_charts()
     anomaly_table = build_anomaly_chart(anomalies, data.get("anomaly_count", 0))
     cardio_html = build_cardio_analysis(cardio, data)
 
+    show_packet = not exercise_mode_html  # 运动场景已用运动模式识别替换报文分类统计
     chart_js = build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies,
-                              scenario=cardio["scenario"], mode_dict=mode_dict)
+                              scenario=cardio["scenario"], mode_dict=mode_dict,
+                              show_packet=show_packet)
 
     page_title = "睡眠心率HRV分析报告 — XOSS X2PRO" if cardio["scenario"] == "sleep" else "心率分析报告 — XOSS X2PRO"
 
@@ -821,7 +822,6 @@ def generate_html(json_path, csv_path, output_path):
         device_info=device_info,
         data_overview=data_overview,
         exercise_summary=exercise_summary_html,
-        exercise_mode=exercise_mode_html,
         hrv_metrics=hrv_metrics_html,
         charts_row1=charts_row1,
         trend_chart=trend_chart,
@@ -1103,17 +1103,29 @@ def build_hrv_metrics(hrv, hrv_tips=None):
 </div>'''
 
 
-def build_charts_row1(scenario="exercise"):
+def build_charts_row1(scenario="exercise", exercise_mode_html=""):
+    """第一行图表区（grid-2）。
+
+    左：运动负荷分布 / 睡眠心率区间分布（环形图）。
+    右：运动场景下放「运动模式识别」卡片；睡眠场景无运动模式，回退为「报文分类统计」。
+    """
     chart_title = "睡眠心率区间分布" if scenario == "sleep" else "运动负荷分布"
-    return f'''<div class="grid-2" style="margin-bottom:16px">
-  <div class="card">
+    left = f'''<div class="card">
     <h2>{chart_title}</h2>
     <div class="chart-wrap" style="aspect-ratio: 1/1; width: 100%; max-width: 400px; margin: 0 auto;"><canvas id="exerciseChart"></canvas></div>
-  </div>
-  <div class="card" style="display:flex; flex-direction:column;">
+  </div>'''
+    if exercise_mode_html:
+        # 运动模式识别卡片（已是完整 .card，去掉外 margin 避免 grid 行内多余留白）
+        right = exercise_mode_html.replace('margin-bottom:16px', '')
+    else:
+        # 睡眠场景无运动模式，右侧回退为报文分类统计
+        right = f'''<div class="card" style="display:flex; flex-direction:column;">
     <h2>报文分类统计</h2>
     <div class="chart-wrap-packet" style="flex:1; min-height:0; padding:0;"><canvas id="packetChart"></canvas></div>
-  </div>
+  </div>'''
+    return f'''<div class="grid-2" style="margin-bottom:16px">
+  {left}
+  {right}
 </div>'''
 
 
@@ -1288,7 +1300,7 @@ def build_cardio_analysis(cardio, data):
 </div>'''
 
 
-def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None, scenario="exercise", mode_dict=None):
+def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None, scenario="exercise", mode_dict=None, show_packet=False):
     """生成Chart.js脚本 - 优化版: 高清、圆环样式、悬停性能提升"""
     # 运动负荷数据
     seg_keys = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
@@ -1353,6 +1365,52 @@ def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None
 
     # 全局DPI适配：最小2x高清
     dpi_fallback = 'Math.max(window.devicePixelRatio || 2, 2)'
+
+    # 报文分类柱状图脚本（仅在 show_packet 为真时渲染，避免在无对应 canvas 时报错中断后续图表）
+    packet_block = f'''
+// === 报文分类柱状图 ===
+new Chart(document.getElementById('packetChart'), {{
+  type: 'bar',
+  data: {{
+    labels: {json.dumps(pkt_labels)},
+    datasets: [{{
+      label: '报文数量',
+      data: {json.dumps(pkt_values)},
+      backgroundColor: {json.dumps(pkt_colors)},
+      borderRadius: 4,
+      borderSkipped: false,
+      barThickness: 'flex',
+      maxBarThickness: 48
+    }}]
+  }},
+  options: {{
+    indexAxis: 'y',
+    responsive: true,
+    maintainAspectRatio: false,
+    layout: {{ padding: {{ top: 8, bottom: 8, left: 0, right: 0 }} }},
+    animation: false,
+    interaction: {{ mode: 'nearest', intersect: true }},
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{ animation: false, delay: 0 }}
+    }},
+    scales: {{
+      x: {{
+        title: {{ display: true, text: '数量', font: {{ size: 11 }} }},
+        grid: {{ display: true, drawBorder: false }},
+        border: {{ display: true }},
+        ticks: {{ font: {{ size: 10 }} }}
+      }},
+      y: {{
+        title: {{ display: true, text: '报文类型', font: {{ size: 11 }} }},
+        grid: {{ display: false }},
+        border: {{ display: false }},
+        ticks: {{ padding: 8 }}
+      }}
+    }}
+  }}
+}});
+'''
 
     # 运动模式概率分布条形图（仅运动场景渲染）
     mode_block = ""
@@ -1460,48 +1518,7 @@ new Chart(document.getElementById('exerciseChart'), {{
     }}
   }}
 }});
-// === 报文分类柱状图 ===
-new Chart(document.getElementById('packetChart'), {{
-  type: 'bar',
-  data: {{
-    labels: {json.dumps(pkt_labels)},
-    datasets: [{{
-      label: '报文数量',
-      data: {json.dumps(pkt_values)},
-      backgroundColor: {json.dumps(pkt_colors)},
-      borderRadius: 4,
-      borderSkipped: false,
-      barThickness: 'flex',
-      maxBarThickness: 48
-    }}]
-  }},
-  options: {{
-    indexAxis: 'y',
-    responsive: true,
-    maintainAspectRatio: false,
-    layout: {{ padding: {{ top: 8, bottom: 8, left: 0, right: 0 }} }},
-    animation: false,
-    interaction: {{ mode: 'nearest', intersect: true }},
-    plugins: {{
-      legend: {{ display: false }},
-      tooltip: {{ animation: false, delay: 0 }}
-    }},
-    scales: {{
-      x: {{
-        title: {{ display: true, text: '数量', font: {{ size: 11 }} }},
-        grid: {{ display: true, drawBorder: false }},
-        border: {{ display: true }},
-        ticks: {{ font: {{ size: 10 }} }}
-      }},
-      y: {{
-        title: {{ display: true, text: '报文类型', font: {{ size: 11 }} }},
-        grid: {{ display: false }},
-        border: {{ display: false }},
-        ticks: {{ padding: 8 }}
-      }}
-    }}
-  }}
-}});
+{packet_block if show_packet else ""}
 // === 心率趋势折线图 ===
 new Chart(document.getElementById('trendChart'), {{
   type: 'line',
