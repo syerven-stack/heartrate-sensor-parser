@@ -816,7 +816,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .hrv-item:hover {{ z-index: 200; }}
   .hrv-item:hover .hrv-tip {{ display: block; }}
   .hrv-interp-table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 10px; }}
-  .hrv-interp-table th {{ text-align: left; padding: 8px 12px; background: #f9fafb; border-bottom: 2px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); }}
+  .hrv-interp-table th {{ text-align: left; padding: 8px 12px; background: #f9fafb; border-bottom: 2px solid var(--border); font-weight: 600; white-space: nowrap; font-size: 13px; text-transform: uppercase; color: var(--text-secondary); }}
   .hrv-interp-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }}
   .hrv-interp-table td.metric {{ font-weight: 600; white-space: nowrap; cursor: help; }}
   .hrv-interp-table td.value {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
@@ -1312,7 +1312,7 @@ def build_cardio_analysis(cardio, data):
         hrv_table = (
             '<table class="hrv-interp-table">\n'
             '      <thead><tr>'
-            '<th>指标</th><th>数值</th><th>异常</th><th>参考正常范围</th><th>解读</th>'
+            '<th>指标</th><th>数值</th><th>异常</th><th>参考范围</th><th>解读</th>'
             '</tr></thead>\n'
             '      <tbody>\n' + "\n".join(tr_html) + '\n      </tbody>\n'
             '      </table>'
