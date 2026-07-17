@@ -74,6 +74,22 @@ def _load_skill_version(default: str = "V2.4.8") -> str:
 SKILL_VERSION = _load_skill_version()
 
 
+# ==================== HRV 指标元数据 ====================
+
+HRV_METRIC_DESC = {
+    "SDNN": "全部 RR 间期的标准差，反映交感+迷走神经总体心率变异性",
+    "RMSSD": "相邻 RR 差值平方均值的根号，评估副交感最敏感指标",
+    "SDSD": "相邻 RR 差值的标准差，反映迷走神经活性",
+    "SDARR": "相邻 RR 差值绝对值的标准差，反映逐跳心跳快慢变化的稳定程度",
+    "pNN50": "相邻 RR 差值 >50ms 的百分比",
+    "pNN20": "相邻 RR 差值 >20ms 的百分比",
+    "CVRR": "SDNN/平均RR×100%，变异系数",
+    "HRV 三角指数": "总心跳数/最大频数 bin 的值，基于 RR 直方图频数分布",
+    "Tin": "RR 间期中位数，剔除早搏/异常干扰后的基础窦性心跳间隔",
+    "RR 极差": "最大 RR 与最小 RR 的差，反映心率波动最大幅度",
+}
+
+
 # ==================== 心内科分析引擎 ====================
 
 class CardioAnalyzer:
@@ -214,8 +230,23 @@ class CardioAnalyzer:
 
         return {"flags": flags, "confidence": confidence}
 
-    def interpret_hrv_metrics(self):
-        """逐项解读HRV指标"""
+    # ==================== HRV 结构化解读（表格数据源）====================
+
+    @staticmethod
+    def _hrv_flag(value, lo, hi):
+        """按参考范围计算 H/L/空 标记；lo 或 hi 为 None 时表示该方向不设阈值。"""
+        if value is None or value == 0:
+            return ""
+        if hi is not None and value > hi:
+            return "H"
+        if lo is not None and value < lo:
+            return "L"
+        return ""
+
+    def _hrv_rows(self, scenario):
+        """构建 HRV 时域指标表格的结构化行。返回 list[dict]：
+        {metric, desc, value, unit, value_str, flag, range, interpretation}。
+        """
         sdnn = self._get("SDNN(ms)", 0)
         rmssd = self._get("RMSSD(ms)", 0)
         sdsd = self._get("SDSD(ms)", 0)
@@ -227,76 +258,212 @@ class CardioAnalyzer:
         tin = self._get("Tin(ms)", 0)
         rr_range = self._get("RR极差(ms)", 0)
         avg_hr = self._get("平均瞬时心率(bpm)", 0)
-        avg_rr = self._get("平均RR间期(ms)", 0)
-
-        items = []
-
-        # SDNN
-        if sdnn > 100:
-            items.append(f"SDNN={sdnn}ms，显著偏高。在平均心率{avg_hr}bpm的运动状态下通常应<80ms。需结合三角指数判断是否为离群值拉高。")
-        elif sdnn > 60:
-            items.append(f"SDNN={sdnn}ms，处于运动状态的正常偏高范围，提示总体自主神经调控储备尚可。")
-        else:
-            items.append(f"SDNN={sdnn}ms，处于运动状态的正常范围。")
-
-        # RMSSD
-        if avg_hr > 120 and rmssd > 60:
-            items.append(f"RMSSD={rmssd}ms，在运动中异常偏高。该值通常见于静息状态，运动中>40ms即属罕见，强烈提示逐跳RR存在非生理性跳变。")
-        elif rmssd > 30:
-            items.append(f"RMSSD={rmssd}ms，迷走神经在运动中保持一定张力，是自主神经调节健康的积极信号。")
-        else:
-            items.append(f"RMSSD={rmssd}ms，运动中迷走神经活性正常受抑，符合运动生理规律。")
-
-        # SDSD
-        if sdsd > 0:
-            if abs(sdsd - rmssd) < 1:
-                items.append(f"SDSD={sdsd}ms，与RMSSD高度一致，逐跳变异幅度均匀。")
-            else:
-                items.append(f"SDSD={sdsd}ms，与RMSSD存在差异(SDSD/RMSSD={sdsd/rmssd:.2f})。")
-
-        # SDARR
-        items.append(f"SDARR={sdarr}ms，逐跳RR差值绝对值的标准差，反映心跳快慢变化的稳定性。")
-
-        # pNN50/pNN20
-        if pnn50 > 5:
-            items.append(f"pNN50={pnn50}%，显著偏高。运动中通常<3%。{pnn50}%意味着超过{pnn50:.0f}%的心跳存在相邻RR差值>50ms的大幅跳变。")
-        elif pnn50 > 2:
-            items.append(f"pNN50={pnn50}%，运动中处于正常偏高范围。")
-        else:
-            items.append(f"pNN50={pnn50}%，运动中属于正常偏低水平。")
-
-        if pnn20 > 0:
-            ratio = pnn50 / pnn20 if pnn20 > 0 else 0
-            if ratio > 0.9:
-                items.append(f"pNN20={pnn20}%，与pNN50接近(比值{ratio:.2f})，说明绝大部分逐跳变异超过50ms阈值，非典型生理分布。")
-            else:
-                items.append(f"pNN20={pnn20}%，与pNN50的比值为{ratio:.2f}，大部分变异集中在20-50ms区间，符合运动生理规律。")
-
-        # CVRR
-        if cvrr > 20:
-            items.append(f"CVRR={cvrr}%，变异系数极高。远超运动状态正常范围(5-12%)，提示RR离散度不成比例地大。")
-        elif cvrr > 10:
-            items.append(f"CVRR={cvrr}%，变异系数处于正常偏高范围，自主神经调节弹性良好。")
-        else:
-            items.append(f"CVRR={cvrr}%，变异系数正常。")
-
-        # 三角指数
-        if tri < 10:
-            items.append(f"HRV三角指数={tri}，偏低。若同时SDNN偏高，提示存在长尾分布的离群RR值(传感器伪差特征)。")
-        else:
-            items.append(f"HRV三角指数={tri}，处于正常范围，RR间期整体分布较为集中，无心律失常引起的分布畸变。")
-
-        # Tin
         tin_hr = round(60000 / tin) if tin > 0 else 0
-        items.append(f"Tin={tin}ms(约{tin_hr}bpm)，中位RR间期，比均值更能抵抗异常值干扰。")
 
-        # RR极差
-        if rr_range > 1200:
-            items.append(f"RR极差={rr_range}ms，跨度极大，包含极端离群值。")
+        def fmt(v, unit):
+            if isinstance(v, (int, float)):
+                return f"{float(v):.2f} {unit}".strip()
+            return f"{v} {unit}".strip()
+
+        def row(metric, value, unit, lo, hi, range_text, interp):
+            return {
+                "metric": metric,
+                "desc": HRV_METRIC_DESC.get(metric, ""),
+                "value": value,
+                "unit": unit,
+                "value_str": fmt(value, unit),
+                "flag": self._hrv_flag(value, lo, hi),
+                "range": range_text,
+                "interpretation": interp,
+            }
+
+        rows = []
+
+        if scenario == "sleep":
+            # SDNN 60-120 ms
+            if sdnn > 120:
+                interp = "睡眠期偏高。长程记录 SDNN 天然抬升，且对体位改变/觉醒簇离群值敏感，建议结合三角指数交叉校验；若三角指数正常，多为生理性长尾。"
+            elif sdnn >= 60:
+                interp = "睡眠期正常范围，总体自主神经调控储备良好。"
+            else:
+                interp = "睡眠期偏低，可能提示自主神经调节弹性不足或睡眠深度较浅。"
+            rows.append(row("SDNN", sdnn, "ms", 60, 120, "60 – 120 ms", interp))
+
+            # RMSSD 30-80 ms
+            if rmssd > 80:
+                interp = "睡眠期高位。深睡眠(N3)期典型表现为 RMSSD 升高、心率变缓，多为生理性，是深睡眠质量良好的间接佐证。"
+            elif rmssd >= 30:
+                interp = "睡眠期正常范围，迷走神经张力健康。"
+            else:
+                interp = "睡眠期偏低，可能提示恢复不充分或自主神经调节弹性不足。"
+            rows.append(row("RMSSD", rmssd, "ms", 30, 80, "30 – 80 ms", interp))
+
+            # SDSD — 无独立参考范围，做一致性检查
+            if rmssd > 0 and abs(sdsd - rmssd) < 1:
+                interp = "与 RMSSD 高度一致（≈相等），逐跳变异幅度均匀，数据一致性良好。"
+            elif rmssd > 0:
+                ratio = sdsd / rmssd
+                interp = f"与 RMSSD 存在差异（SDSD/RMSSD={ratio:.2f}），需关注数据一致性。"
+            else:
+                interp = "近似 RMSSD 的一致性检查指标。"
+            rows.append(row("SDSD", sdsd, "ms", None, None, "—", interp))
+
+            # SDARR — 无参考范围
+            rows.append(row("SDARR", sdarr, "ms", None, None, "—",
+                            "反映呼吸性窦性心律不齐(RSA)幅度，是健康自主神经功能的标志。"))
+
+            # pNN50 20-60%
+            if pnn50 > 60:
+                interp = "极高，超过多数深睡眠人群分布上限，需结合三角指数排查伪差。"
+            elif pnn50 >= 20:
+                interp = "睡眠期正常范围，迷走神经调节功能良好；接近上限时反映深睡眠期迷走张力充沛。"
+            else:
+                interp = "睡眠期偏低，可能提示深睡眠占比不足或自主神经调节欠佳。"
+            rows.append(row("pNN50", pnn50, "%", 20, 60, "20 – 60 %", interp))
+
+            # pNN20 — 无独立参考范围
+            if pnn20 > 0:
+                ratio = pnn50 / pnn20 if pnn20 > 0 else 0
+                interp = f"与 pNN50 比值 {ratio:.2f}，大部分逐跳变异集中在 20-50ms 区间，分布合理。"
+            else:
+                interp = "与 pNN50 联合观察逐跳变异分布集中度。"
+            rows.append(row("pNN20", pnn20, "%", None, None, "—", interp))
+
+            # CVRR 5-10%
+            if cvrr > 10:
+                interp = "睡眠期偏高（正常 5-10%）。可能包含离群心率的放大效应，与 SDNN 联合判定。"
+            elif cvrr >= 5:
+                interp = "睡眠期正常范围，自主神经综合调节弹性良好。"
+            else:
+                interp = "睡眠期偏低。"
+            rows.append(row("CVRR", cvrr, "%", 5, 10, "5 – 10 %", interp))
+
+            # HRV 三角指数 30-50
+            if tri > 50:
+                interp = "偏高，RR 间期分布高度集中。"
+            elif tri >= 30:
+                interp = "健康成年人正常范围，RR 分布集中稳定；对离群值的抗干扰能力强于 SDNN。"
+            else:
+                interp = "偏低。若 SDNN 同时偏高，提示存在长尾离群 RR 值（体位改变/觉醒簇引起的骤变）。"
+            rows.append(row("HRV 三角指数", tri, "", 30, 50, "30 – 50", interp))
+
+            # Tin 900-1200 ms（对应 HR 50-67 bpm）
+            if tin > 1200:
+                interp = f"对应心率约 {tin_hr} bpm（<50），训练有素者常见；若无症状即为生理性。"
+            elif tin >= 900:
+                interp = f"对应心率约 {tin_hr} bpm，属睡眠期理想水平（50-67 bpm）。"
+            else:
+                interp = f"对应心率约 {tin_hr} bpm（>67），睡眠期心率偏高，可能提示浅睡或交感张力增强。"
+            rows.append(row("Tin", tin, "ms", 900, 1200, "900 – 1200 ms", interp))
+
+            # RR 极差 <600 ms（单侧 H）
+            if rr_range > 1200:
+                interp = "跨度极大，多为体位改变或短暂觉醒(arousal)引起的极端心率波动。"
+            elif rr_range > 600:
+                interp = "偏高，可能与 REM 期心率波动或体位改变有关。"
+            else:
+                interp = "睡眠期正常范围。"
+            rows.append(row("RR 极差", rr_range, "ms", None, 600, "< 600 ms", interp))
+
         else:
-            items.append(f"RR极差={rr_range}ms，在运动状态下属于可接受范围。")
+            # ==================== 运动场景 ====================
+            # SDNN 30-80 ms
+            if sdnn > 100:
+                interp = f"运动状态显著偏高（正常 30-80ms，平均心率 {avg_hr} bpm）。需结合三角指数判断是否为离群值拉高。"
+            elif sdnn > 80:
+                interp = "运动状态偏高，总体自主神经调控储备尚可。"
+            elif sdnn >= 30:
+                interp = "运动状态正常范围。"
+            else:
+                interp = "运动状态偏低，自主神经调控储备不足。"
+            rows.append(row("SDNN", sdnn, "ms", 30, 80, "30 – 80 ms", interp))
 
-        return items
+            # RMSSD < 40 ms（单侧 H）
+            if avg_hr > 120 and rmssd > 60:
+                interp = "运动中异常偏高（该值通常见于静息，运动中 >40ms 即属罕见），强烈提示逐跳 RR 存在非生理性跳变。"
+            elif rmssd > 40:
+                interp = "运动中偏高。若同时 avg_hr>120 需警惕传感器伪差。"
+            elif rmssd > 30:
+                interp = "运动中迷走神经保持一定张力，是自主神经调节健康的积极信号。"
+            else:
+                interp = "运动中迷走神经活性正常受抑，符合运动生理规律。"
+            rows.append(row("RMSSD", rmssd, "ms", None, 40, "< 40 ms", interp))
+
+            # SDSD 一致性检查
+            if rmssd > 0 and abs(sdsd - rmssd) < 1:
+                interp = "与 RMSSD 高度一致，逐跳变异幅度均匀。"
+            elif rmssd > 0:
+                ratio = sdsd / rmssd
+                interp = f"与 RMSSD 存在差异（SDSD/RMSSD={ratio:.2f}）。"
+            else:
+                interp = "近似 RMSSD 的一致性检查指标。"
+            rows.append(row("SDSD", sdsd, "ms", None, None, "—", interp))
+
+            # SDARR 无参考
+            rows.append(row("SDARR", sdarr, "ms", None, None, "—",
+                            "逐跳 RR 差值绝对值的标准差，反映心跳快慢变化的稳定性。"))
+
+            # pNN50 < 3%
+            if pnn50 > 5:
+                interp = f"显著偏高（运动中通常 <3%），意味超过 {pnn50:.0f}% 心跳存在相邻 RR >50ms 大幅跳变。"
+            elif pnn50 > 3:
+                interp = "运动中偏高。"
+            elif pnn50 > 2:
+                interp = "运动中正常偏高范围。"
+            else:
+                interp = "运动中正常偏低水平，符合迷走神经受抑规律。"
+            rows.append(row("pNN50", pnn50, "%", None, 3, "< 3 %", interp))
+
+            # pNN20 无参考
+            if pnn20 > 0:
+                ratio = pnn50 / pnn20 if pnn20 > 0 else 0
+                if ratio > 0.9:
+                    interp = f"与 pNN50 接近（比值 {ratio:.2f}），绝大部分变异 >50ms 阈值，非典型生理分布。"
+                else:
+                    interp = f"与 pNN50 比值 {ratio:.2f}，变异主要集中在 20-50ms 区间。"
+            else:
+                interp = "与 pNN50 联合观察逐跳变异分布集中度。"
+            rows.append(row("pNN20", pnn20, "%", None, None, "—", interp))
+
+            # CVRR 5-12%
+            if cvrr > 20:
+                interp = "变异系数极高。远超运动状态正常范围（5-12%），提示 RR 离散度不成比例地大。"
+            elif cvrr > 12:
+                interp = "运动中偏高。"
+            elif cvrr >= 5:
+                interp = "运动中正常范围，自主神经调节弹性良好。"
+            else:
+                interp = "运动中偏低。"
+            rows.append(row("CVRR", cvrr, "%", 5, 12, "5 – 12 %", interp))
+
+            # HRV 三角指数 ≥10（单侧 L）
+            if tri < 10:
+                interp = "偏低。若同时 SDNN 偏高，提示存在长尾分布的离群 RR 值（传感器伪差特征）。"
+            else:
+                interp = "正常范围，RR 分布集中，无心律失常引起的分布畸变。"
+            rows.append(row("HRV 三角指数", tri, "", 10, None, "≥ 10", interp))
+
+            # Tin 无严格参考
+            rows.append(row("Tin", tin, "ms", None, None, "—",
+                            f"中位 RR 间期，对应心率约 {tin_hr} bpm，比均值更抗离群值干扰。"))
+
+            # RR 极差 <1200 ms
+            if rr_range > 1200:
+                interp = "跨度极大，包含极端离群值。"
+            else:
+                interp = "运动状态下可接受范围。"
+            rows.append(row("RR 极差", rr_range, "ms", None, 1200, "< 1200 ms", interp))
+
+        return rows
+
+    @staticmethod
+    def _row_to_prose(r):
+        """将结构化行转成 HRV 数值面板悬停提示可用的一行文本。"""
+        return f"{r['metric']}={r['value_str']}。{r['interpretation']}"
+
+    def interpret_hrv_metrics(self):
+        """逐项解读 HRV 指标（运动场景）。委托给 _hrv_rows 后压平为字符串列表，供 HRV 面板悬停提示与旧接口使用。"""
+        return [self._row_to_prose(r) for r in self._hrv_rows("exercise")]
 
     def analyze_exercise_load(self):
         """分析运动负荷与自主神经调节"""
@@ -466,88 +633,8 @@ class CardioAnalyzer:
         return {"flags": flags, "confidence": confidence}
 
     def interpret_hrv_metrics_sleep(self):
-        """睡眠场景HRV指标逐项解读"""
-        sdnn = self._get("SDNN(ms)", 0)
-        rmssd = self._get("RMSSD(ms)", 0)
-        sdsd = self._get("SDSD(ms)", 0)
-        sdarr = self._get("SDARR(ms)", 0)
-        pnn50 = self._get("pNN50(%)", 0)
-        pnn20 = self._get("pNN20(%)", 0)
-        cvrr = self._get("CVRR(%)", 0)
-        tri = self._get("HRV三角指数", 0)
-        tin = self._get("Tin(ms)", 0)
-        rr_range = self._get("RR极差(ms)", 0)
-        avg_hr = self._get("平均瞬时心率(bpm)", 0)
-
-        items = []
-
-        # SDNN - 睡眠参考范围 60-120ms
-        if sdnn > 130:
-            items.append(f"SDNN={sdnn}ms，显著偏高。健康睡眠人群的SDNN通常在60-120ms之间。{sdnn}ms提示整体心率变异性极高，反映出自主神经系统在夜间保持了丰富的动态调节能力。但从方法学角度看，{self.duration_hours}小时长程记录的SDNN天然高于5分钟短程测量值，且对离群值（如体位改变/觉醒簇）敏感。需结合三角指数做交叉校验。")
-        elif sdnn >= 60:
-            items.append(f"SDNN={sdnn}ms，处于睡眠期的正常偏高范围，提示总体自主神经调控储备良好。")
-        else:
-            items.append(f"SDNN={sdnn}ms，睡眠期SDNN偏低，可能提示自主神经调节弹性不足或睡眠深度较浅。")
-
-        # RMSSD - 睡眠参考范围 30-80ms
-        if rmssd > 80:
-            items.append(f'RMSSD={rmssd}ms，处于睡眠期高位，迷走神经（副交感神经）张力非常强。深睡眠（N3期）的特征正是RMSSD显著升高、心率变缓且变异性增大，这一数值可视作\u201c深睡眠质量良好\u201d的间接佐证。')
-        elif rmssd >= 30:
-            items.append(f"RMSSD={rmssd}ms，睡眠期迷走神经张力正常，自主神经调节健康。")
-        else:
-            items.append(f"RMSSD={rmssd}ms，睡眠期迷走神经张力偏低，可能提示恢复不充分或自主神经调节弹性不足。")
-
-        # SDSD
-        if abs(sdsd - rmssd) < 1:
-            items.append(f"SDSD={sdsd}ms，与RMSSD高度一致，逐跳变异幅度均匀，数据一致性良好。")
-        else:
-            items.append(f"SDSD={sdsd}ms，与RMSSD存在差异(SDSD/RMSSD={sdsd/rmssd:.2f})，需关注数据一致性。")
-
-        # SDARR
-        items.append(f"SDARR={sdarr}ms，逐跳RR差值绝对值的标准差。{sdarr}ms在睡眠场景中处于较高水平，说明夜间心跳并非单调规律，而是存在一定程度的呼吸性窦性心律不齐（RSA，即吸气时心率加快、呼气时心率减慢），这是健康自主神经功能的标志。")
-
-        # pNN50 - 睡眠参考范围：清醒<20%，深睡眠可达30-60%
-        if pnn50 > 40:
-            items.append(f"pNN50={pnn50}%，处于睡眠期高水平。清醒静息状态下pNN50通常<20%，进入睡眠后尤其深睡眠期，迷走神经张力上升导致相邻心跳差异超过50ms的比例大幅增加。{pnn50}%反映迷走神经调节的敏感度和响应速度均处于高水平，是深睡眠质量良好的积极指标。")
-        elif pnn50 > 20:
-            items.append(f"pNN50={pnn50}%，睡眠期正常水平，迷走神经调节功能正常。")
-        else:
-            items.append(f"pNN50={pnn50}%，睡眠期偏低，可能提示深睡眠占比不足或自主神经调节弹性欠佳。")
-
-        # pNN20
-        if pnn20 > 0:
-            ratio = pnn50 / pnn20 if pnn20 > 0 else 0
-            items.append(f"pNN20={pnn20}%，与pNN50的比值为{ratio:.2f}，大部分逐跳变异性集中在20-50ms区间，变异性分布合理，未出现极端离散化模式。")
-
-        # CVRR
-        if cvrr > 15:
-            items.append(f"CVRR={cvrr}%，变异系数偏高。CVRR=SDNN/平均RR×100%，综合反映相对于基础心率水平的变异幅度。睡眠期{cvrr}%是偏高的数值（通常5-10%），但其中包含了离群心率的放大效应。")
-        elif cvrr > 5:
-            items.append(f"CVRR={cvrr}%，变异系数处于睡眠期的正常范围（5-10%），自主神经综合调节弹性良好。")
-        else:
-            items.append(f"CVRR={cvrr}%，变异系数偏低。")
-
-        # 三角指数
-        if tri < 25:
-            items.append(f"HRV三角指数={tri}，偏低。若同时SDNN偏高，提示存在长尾分布的离群RR值（体位改变/觉醒簇引起的骤变）。")
-        elif tri <= 50:
-            items.append(f'HRV三角指数={tri}，处于健康成年人的正常范围（约30-50），RR间期核心分布集中、稳定，心脏基础节律良好。三角指数对离群值的抗干扰能力远强于SDNN\u2014\u2014它对RR间期分布的\u201c基底宽度\u201d进行测量而非对极值敏感。')
-        else:
-            items.append(f"HRV三角指数={tri}，处于正常偏高范围，RR间期整体分布较为集中。")
-
-        # Tin
-        tin_hr = round(60000 / tin) if tin > 0 else 0
-        items.append(f"Tin={tin}ms（约{tin_hr}bpm），中位RR间期。Tin基于RR间期直方图的近似三角形拟合，比算术平均RR更能抵抗离群值的干扰。{tin}ms对应的瞬时心率约{tin_hr}bpm，属于睡眠期理想水平（50-60 bpm）。")
-
-        # RR极差
-        if rr_range > 1200:
-            items.append(f"RR极差={rr_range}ms，跨度极大。睡眠中RR极差通常<600ms，{rr_range}ms提示包含由体位改变或短暂觉醒（arousal）引起的极端心率波动。")
-        elif rr_range > 600:
-            items.append(f"RR极差={rr_range}ms，在睡眠场景中处于偏高范围，可能与REM期心率波动或体位改变有关。")
-        else:
-            items.append(f"RR极差={rr_range}ms，在睡眠场景中属于正常范围。")
-
-        return items
+        """逐项解读 HRV 指标（睡眠场景）。委托给 _hrv_rows。"""
+        return [self._row_to_prose(r) for r in self._hrv_rows("sleep")]
 
     def analyze_sleep_structure(self):
         """分析睡眠结构与自主神经调节"""
@@ -655,15 +742,16 @@ class CardioAnalyzer:
 
     def full_analysis(self):
         """执行完整分析，根据场景自动选择运动/睡眠分析方法"""
+        hrv_rows = self._hrv_rows(self.scenario)
+        hrv_items = [self._row_to_prose(r) for r in hrv_rows]
+
         if self.scenario == "sleep":
             sq = self.assess_signal_quality_sleep()
-            hrv_items = self.interpret_hrv_metrics_sleep()
             exercise_items = self.analyze_sleep_structure()
             anomaly_items, mutation_count, ectopic_count = self.analyze_anomalies_sleep()
             conclusions, recommendations = self.generate_conclusions_sleep()
         else:
             sq = self.assess_signal_quality()
-            hrv_items = self.interpret_hrv_metrics()
             exercise_items = self.analyze_exercise_load()
             anomaly_items, mutation_count, ectopic_count = self.analyze_anomalies()
             conclusions, recommendations = self.generate_conclusions()
@@ -671,6 +759,7 @@ class CardioAnalyzer:
         return {
             "signal_quality": sq,
             "hrv_interpretations": hrv_items,
+            "hrv_interpretation_rows": hrv_rows,
             "exercise_analysis": exercise_items,
             "anomaly_analysis": anomaly_items,
             "anomaly_stats": {"mutation": mutation_count, "ectopic": ectopic_count},
@@ -726,6 +815,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .hrv-tip::before {{ content: ""; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-bottom-color: #1f2937; }}
   .hrv-item:hover {{ z-index: 200; }}
   .hrv-item:hover .hrv-tip {{ display: block; }}
+  .hrv-interp-table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 10px; }}
+  .hrv-interp-table th {{ text-align: left; padding: 8px 12px; background: #f9fafb; border-bottom: 2px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); }}
+  .hrv-interp-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }}
+  .hrv-interp-table td.metric {{ font-weight: 600; white-space: nowrap; cursor: help; }}
+  .hrv-interp-table td.value {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  .hrv-interp-table td.flag {{ text-align: center; white-space: nowrap; }}
+  .hrv-interp-table td.range {{ color: var(--text-secondary); white-space: nowrap; }}
+  .hrv-interp-table td.interp {{ color: #374151; line-height: 1.65; }}
+  .hrv-flag-h {{ display: inline-block; padding: 2px 8px; border-radius: 4px; background: #fee2e2; color: #991b1b; font-size: 11px; font-weight: 600; }}
+  .hrv-flag-l {{ display: inline-block; padding: 2px 8px; border-radius: 4px; background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 600; }}
+  @media (max-width: 640px) {{ .hrv-interp-table th, .hrv-interp-table td {{ padding: 6px 8px; font-size: 12px; }} .hrv-interp-table td.interp {{ font-size: 12px; }} }}
   .anomaly-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
   .anomaly-table th {{ text-align: left; padding: 8px 12px; background: #f9fafb; border-bottom: 2px solid var(--border); font-weight: 600; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); }}
   .anomaly-table td {{ padding: 7px 12px; border-bottom: 1px solid var(--border); }}
@@ -1059,9 +1159,9 @@ _HRV_TIP_KEYWORD = {
     "pNN50": "pNN50",
     "pNN20": "pNN20",
     "CVRR": "CVRR",
-    "HRV 三角指数": "HRV三角指数",
+    "HRV 三角指数": "HRV 三角指数",
     "Tin (ms)": "Tin",
-    "RR 极差 (ms)": "RR极差",
+    "RR 极差 (ms)": "RR 极差",
 }
 
 
@@ -1170,6 +1270,7 @@ def build_anomaly_chart(anomalies, total_count):
 def build_cardio_analysis(cardio, data):
     sq = cardio["signal_quality"]
     hrv_interp = cardio["hrv_interpretations"]
+    hrv_rows = cardio.get("hrv_interpretation_rows", [])
     exercise = cardio["exercise_analysis"]
     anomaly_items = cardio["anomaly_analysis"]
     conclusions = cardio["conclusions"]
@@ -1186,12 +1287,42 @@ def build_cardio_analysis(cardio, data):
     def render_highlight(content):
         return f'      <div class="cardio-highlight">\n        {content}\n      </div>'
 
-    hrv_parts = []
-    for item in hrv_interp:
-        if item.startswith("SDNN") or item.startswith("RMSSD"):
-            hrv_parts.append(f"<p><strong>{item.split('。')[0]}。</strong>{'。'.join(item.split('。')[1:])}</p>")
-        else:
-            hrv_parts.append(f"<p>{item}</p>")
+    # 用表格形式渲染 HRV 时域指标逐项解读
+    def _flag_cell(flag):
+        if flag == "H":
+            return '<span class="hrv-flag-h">H</span>'
+        if flag == "L":
+            return '<span class="hrv-flag-l">L</span>'
+        return ""
+
+    if hrv_rows:
+        tr_html = []
+        for r in hrv_rows:
+            desc = escape_html(r.get("desc", ""))
+            metric_cell = f'<td class="metric" title="{desc}">{escape_html(r["metric"])}</td>' if desc else f'<td class="metric">{escape_html(r["metric"])}</td>'
+            tr_html.append(
+                "      <tr>"
+                f"{metric_cell}"
+                f'<td class="value">{escape_html(r["value_str"])}</td>'
+                f'<td class="flag">{_flag_cell(r["flag"])}</td>'
+                f'<td class="range">{escape_html(r["range"])}</td>'
+                f'<td class="interp">{escape_html(r["interpretation"])}</td>'
+                "</tr>"
+            )
+        hrv_table = (
+            '<table class="hrv-interp-table">\n'
+            '      <thead><tr>'
+            '<th>指标</th><th>数值</th><th>异常</th><th>参考正常范围</th><th>解读</th>'
+            '</tr></thead>\n'
+            '      <tbody>\n' + "\n".join(tr_html) + '\n      </tbody>\n'
+            '      </table>'
+        )
+    else:
+        # 兜底：若 rows 缺失，回退到旧的段落渲染
+        parts = []
+        for item in hrv_interp:
+            parts.append(f"<p>{escape_html(item)}</p>")
+        hrv_table = "".join(parts)
 
     # 场景相关的 HRV 小结
     if scenario == "sleep":
@@ -1219,7 +1350,7 @@ def build_cardio_analysis(cardio, data):
     # 构建心内科HTML
     hrv_html = f'''    <div class="cardio-block">
       <h3>二、HRV 时域指标逐项解读</h3>
-{"".join(hrv_parts)}
+      {hrv_table}
 {signal_note}
     </div>'''
 
