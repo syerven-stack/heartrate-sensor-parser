@@ -592,7 +592,7 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_
             "hrv_metrics": hrv_res,
             "exercise_segments": seg_detail,
             "exercise_summary": seg_summary,
-            "anomalies": anomalies[:50],
+            "anomalies": anomalies,
             "anomaly_count": len(anomalies),
             "log_time_range": {"start": log_start_time, "end": log_end_time},
             "exercise_mode": exercise_mode_result,

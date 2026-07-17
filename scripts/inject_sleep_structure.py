@@ -476,6 +476,7 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
     stage_colors_arr = [STAGE_COLORS[k] for k in STAGES]
 
     tst_h = m['tst_min']/60.0
+    tib_h = m['tib_min']/60.0
     grade_color = {'A':'#238636','B':'#3fb950','C':'#d29922','D':'#db6d28','E':'#f85149'}.get(grade[0], '#3fb950')
 
     # 维度 HTML
@@ -507,12 +508,12 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
   </h2>
   <div class="sleep-chart-grid">
     <div>
-      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">分期时长分布（min）/ 有效睡眠时间（{m["tst_min"]:.0f} min）</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">分期时长分布（min）/ 睡眠时长（{m["tst_min"]:.0f} min / {tst_h:.1f} h）</div>
       <div style="height:280px;width:100%;"><canvas id="stageBarChart"></canvas></div>
     </div>
     <div>
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px;">
-        <div style="font-size:12px;color:var(--text-secondary);">睡眠分期时序图（总时间 {tst_h:.1f} 小时）</div>
+        <div style="font-size:12px;color:var(--text-secondary);">睡眠分期时序图 / 在床时长（{m["tib_min"]:.0f} min / {tib_h:.1f} h）</div>
         <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--text-secondary);">
           <span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;background:#3457D5;border-radius:2px;display:inline-block;"></span>深睡 N3</span>
           <span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:10px;height:10px;background:#58A6FF;border-radius:2px;display:inline-block;"></span>浅睡 N1/N2</span>
@@ -524,7 +525,7 @@ def inject_html(m, total, grade, dims, epochs, hr_base):
     </div>
   </div>
   <div style="margin-top:14px;padding:10px 14px;background:rgba(88,166,255,.08);border-left:3px solid #58A6FF;border-radius:4px;font-size:13px;color:var(--text-secondary);line-height:1.7;">
-    <strong>方法说明:</strong> 基于 HRV 代理法（非 PSG 诊断）。30 s 分帧，5 min 滑窗特征（HR、RMSSD、HR 波动率）。分期规则基于个人夜间基线 HR ≈ {hr_base:.1f} bpm 与 RMSSD 分位。REM 与 N1/N2 边界依赖 HR 短时波动，比 PSG 更粗；短暂觉醒可能计入 Wake。
+    <strong>方法说明:</strong> 基于 HRV 代理法（非 PSG 诊断）；30s 分帧，5min 滑窗特征（HR、RMSSD、HR 波动率）；分期规则基于个人夜间基线 HR ≈ {hr_base:.1f} bpm 与 RMSSD 分位；REM 与 N1/N2 边界依赖 HR 短时波动，比 PSG 更粗；短暂觉醒可能计入 Wake。
   </div>
 </div>
 <script>
