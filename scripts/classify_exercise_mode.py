@@ -526,6 +526,28 @@ def classify_mode(features):
     uphill_extreme = _clip((drift_pct - 0.55) / 0.25)
     downhill_signal = _clip((-drift_pct - 0.05) / 0.15) * bim_n
 
+    # bimodal_climb —— 上下山混合段通道（V2.5.3 新增）
+    # 背景：上下山 session 中当下山段不足以让整体 drift_pct 翻负时，
+    # uphill_extreme（需 drift_pct≥0.55）和 downhill_signal（需 drift_pct≤-0.05）
+    # 均无法触发，爬山分类落入骑行稳态通道的死区。
+    #
+    # 特征：上下山混合段表现为「中等正漂移(0.05~0.55) + 高双峰性(bim≥0.7) +
+    # 中高负荷(high_pct≥20%)」。骑行样本的双峰性普遍 ≤0.67（0715-qx: 0.62,
+    # 0629-qx: 0.61, 0714-qx: 0.64），上下山样本 ≥0.74（0718-ps-2: 0.76,
+    # 0712_ps-2: 0.76+），bim_n² 放大该分离度。
+    #
+    # 三组门控：
+    #   drift_comp —— drift_pct 从 0.05 开始起效、0.30 饱和，排除静息/热身段
+    #   drift_upper —— drift_pct 超过 0.55 后衰减、0.70 归零，避免与 uphill_extreme 重叠
+    #   hp_gate —— high_pct ≥20% 起效、40% 饱和，排除低负荷骑行（0715-qx: 0%）
+
+    high_pct = features.get("high_pct", 0.0)
+    
+    bim_drift_comp = _clip((drift_pct - 0.05) / 0.25)
+    bim_drift_upper = 1.0 - _clip((drift_pct - 0.55) / 0.15)
+    hp_gate = _clip((high_pct - 20.0) / 20.0)
+    bimodal_climb = (bim_n ** 2) * bim_drift_comp * bim_drift_upper * hp_gate
+    
     # 跑步专属信号 sustained_high：捕捉"持续中高强度 + 高变异 + 正/近零漂移"这一跑步指纹
     #   sustained_pct：high_pct(75-90% HRmax 心率区间占比) 从 25% 到 55% 的相对位置。
     #     high_pct 已在 parse 阶段按个体 hr_p95 动态划分区间(ACSM 比例)，跨人群普适。
@@ -552,7 +574,7 @@ def classify_mode(features):
     #     天然会随时间波动；骑行稳态是"心血管系统被锁定"，std 波动极小。这个维度不依赖
     #     HRmax，跨人群普适（阈值 3.5/5.0 是 bpm 的 std 的 std，本质是分布形态量）。
     #   五者相乘：任一维度不满足跑步物理特征即让 sustained_high 归零。
-    high_pct = features.get("high_pct", 0.0)
+
     sustained_pct = _clip((high_pct - 25.0) / 30.0)
     var_running = _clip((features["variability"] - 4.0) / 4.0)
     drift_gate = _clip((drift_pct + 0.20) / 0.10)
@@ -618,7 +640,8 @@ def classify_mode(features):
     running_specific = 2.5 * drift_n * sostd_gate + 1.5 * sustained_high + 1.5 * endurance_high
     scores = {
         "爬山": 1.0 * struct_n + 0.8 * var_n + 0.8 * tail_n
-                + 5.0 * uphill_extreme + 3.0 * downhill_signal + 1.0 * endurance_high,
+                + 5.0 * uphill_extreme + 3.0 * downhill_signal + 1.0 * endurance_high
+                + 8.0 * bimodal_climb,
         "骑行": 1.0 * struct_n + 2.0 * load_n + 0.6 * var_n + 0.6 * tail_n + 1.0 * steady_cycling,
         "跑步": 1.0 * struct_n + 1.5 * load_n + running_specific + 0.4 * tail_n,
         "游泳": 0.5 * struct_n + 0.5 * (1 - load_n) + 1.0 * (1 - bim_n) + 0.6 * gap_n + 0.6 * tail_n,

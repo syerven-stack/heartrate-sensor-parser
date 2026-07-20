@@ -3,49 +3,37 @@ name: heartrate-sensor-parser
 description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
 metadata:
   short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
-version: V2.5.2 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HRV时域指标表格化解读 + HTML报告(Chart.js自包含) + 心内科综合分析
+version: V2.5.3 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HRV时域指标表格化解读 + HTML报告(Chart.js自包含) + 心内科综合分析
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
 function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、运动模式细分识别（骑行/跑步/游泳/爬山/混合）、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(Chart.js内联+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.5.2
+# heartrate-sensor-parser 技能使用手册 V2.5.3
 
 ## 一、技能概述
 专用 XOSS 心率设备 BLE 调试日志离线解析工具。自动识别 2/4/6/8 字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR 间期、全量 HRV 时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR 间期突变/疑似早搏），**对运动场景额外做运动模式细分识别（骑行/跑步/游泳/爬山/混合）**，输出标准化 Excel 三表 + CSV + JSON + 分段运动心律波动分析报告 + HTML 可视化报告（**Chart.js 已内联，离线/沙箱预览可直接出图，无需联网**）。
 
-### V2.5.2 核心变更（对比 V2.5.1）
+### V2.5.3 核心变更（对比 V2.5.2）
 
-**心内科综合分析 → 「二、HRV 时域指标逐项解读」由 `<p>` 段落改为标准化 5 列表格**，让阈值判定和解读文案分离，扫描效率更高。
+**爬山分类新增 `bimodal_climb` 通道**，覆盖上下山混合段中 drift_pct 未翻负的盲区。
 
-1. **表格 5 列** —— 指标 / 数值 / 异常 / 参考正常范围 / 解读。
-   - `异常` 列：数值超参考上限显示红胶囊 `H`，低于下限显示蓝胶囊 `L`，正常态**留空**。
-   - `参考正常范围` 列：无标准区间的指标（SDSD / SDARR / pNN20）显示 `—`。
-   - `指标` 列：`<td class="metric" title="...">` 挂指标定义（取自 §5 表格，如 SDNN → "全部 RR 间期的标准差…"），鼠标悬停弹释义。
+1. **问题**：上下山 session 中当下山段不足以让整体 drift_pct 翻负时，`uphill_extreme`（需 drift_pct≥0.55）和 `downhill_signal`（需 drift_pct≤-0.05）均无法触发，爬山分类落入骑行稳态通道（`steady_cycling`）的死区。0718-ps-2（上下山，drift_pct=0.1955）被误判为骑行 0.54。
 
-2. **单一数据源 `CardioAnalyzer._hrv_rows(scenario)`** —— 10 项指标的参考区间、flag 阈值、解读文案集中收在此方法，返回 `List[Dict{metric, desc, value, unit, value_str, flag, range, interpretation}]`。运动/睡眠两套阈值互不重叠。`full_analysis()` 输出同步新增 `hrv_interpretation_rows` 字段供 `build_cardio_analysis` 消费；`interpret_hrv_metrics` / `interpret_hrv_metrics_sleep` 瘦身为薄壳（走 `_hrv_rows` → `_row_to_prose`）。
+2. **`bimodal_climb` 通道**（`classify_exercise_mode.py` `classify_mode()`）—— 三组门控相乘：
+   - `bim_drift_comp`：drift_pct 从 0.05 起效、0.30 饱和，排除静息/热身段
+   - `bim_drift_upper`：drift_pct 超过 0.55 后衰减、0.70 归零，避免与 `uphill_extreme` 重叠
+   - `hp_gate`：high_pct ≥20% 起效、40% 饱和，排除低负荷骑行
+   - `bimodal_climb = bim_n² × bim_drift_comp × bim_drift_upper × hp_gate`，爬山打分加 `8.0 × bimodal_climb`
 
-3. **参考正常范围**（本版本采用的共识）——
-   - **睡眠**：SDNN 60–120 ms、RMSSD 30–80 ms、pNN50 20–60%、CVRR 5–10%、HRV 三角指数 30–50、Tin 900–1200 ms、RR 极差 < 600 ms（仅 H 侧）；SDSD / SDARR / pNN20 无阈值。
-   - **运动**：SDNN 30–80 ms、RMSSD < 40 ms（仅 H）、pNN50 < 3%（仅 H）、CVRR 5–12%、HRV 三角指数 ≥ 10（仅 L）、RR 极差 < 1200 ms（仅 H）；其余无阈值。
-   - `H` 语义为"数值高于上限"，**不等于病理性异常**——例如睡眠 RMSSD > 80 通常是深睡眠期迷走神经张力充沛的生理性表现，解读列会明说。
+3. **设计依据**：上下山混合段表现为「中等正漂移(0.05~0.55) + 高双峰性(bim≥0.7) + 中高负荷(high_pct≥20%)」。骑行样本双峰性普遍 ≤0.67，上下山样本 ≥0.74，`bim_n²` 放大该分离度。`hp_gate` 替代 `climb`（参考样本表中已确认 climb 对骑行/跑步无区分力）作为安全阀。
 
-4. **样式** —— `<style>` 新增 `.hrv-interp-table` / `.hrv-flag-h`（红）/ `.hrv-flag-l`（蓝），配色与 `.anomaly-table` 统一；≤ 640 px 断点缩字号避免溢出。
-
-5. **兼容性** ——
-   - `hrv_interpretations`（`List[str]`）字段保留，格式改为紧凑版 `"指标名=数值。解读"`，HRV 数值面板悬停提示 `_find_hrv_tip` 匹配无回归。
-   - 同步修正 `_HRV_TIP_KEYWORD` 里 `HRV 三角指数` / `RR 极差` 关键字空格对齐，避免这两项在面板上悬停丢项。
-   - `build_cardio_analysis` 未拿到 `hrv_interpretation_rows` 时（旧版 cardio dict）自动回退段落形式。
-
-6. **回归验证**——
-   - **0715-qx（运动/骑行）**：`CVRR 13.9 H`，其余 9 项空。
-   - **0706-sp（睡眠）**：`SDNN 149.84 H` / `RMSSD 81.55 H` / `CVRR 13.58 H` / `RR 极差 1401.37 H`；其余 6 项空。
-   - HRV 数值面板 10/10 悬停命中，Chart.js 图表数量不变。
+4. **回归验证**（全部已知样本）—— **零回归**。骑行样本因 high_pct 低（0715-qx: 0%、0714-qx: 16.6%）被 `hp_gate` 挡下；跑步样本因 bim 低（0714-pb: 0.305）或 drift_pct 低（0701-pb: 0.005）被 `bim_n²` / `drift_comp` 挡下。
 
 ### 更早版本变更
 
-V2.5.1 及更早版本的详细变更说明已归档到 [`references/version_history.md`](references/version_history.md)；如需完整技术细节可直接查看该文件，或回溯 git 历史（`git log --oneline SKILL.md`）。
+V2.5.2 及更早版本的详细变更说明已归档到 [`references/version_history.md`](references/version_history.md)；如需完整技术细节可直接查看该文件，或回溯 git 历史（`git log --oneline SKILL.md`）。
 
 ### 前置条件
 - **Python 3.8+（仅使用标准库，无需安装第三方依赖、无需 pip install）**
@@ -183,7 +171,7 @@ python scripts/generate_report.py \
 - `double_rr_rate > 0.05`（双 RR / 漏搏伪迹过多）
 
 ### 6.3 打分与概率
-- 9 特征经各模式加权打分（登山重结构分+双峰、骑行重负荷+低间歇、跑步重负荷+漂移、游泳反负荷反平稳+高缺口），`softmax` 归一化为 5 模式概率。
+- 9 特征经各模式加权打分（登山重结构分+双峰+`bimodal_climb`中等漂移双峰通道、骑行重负荷+低间歇+`steady_cycling`、跑步重负荷+漂移、游泳反负荷反平稳+高缺口），`softmax` 归一化为 5 模式概率。
 - 低置信触发：`margin < 0.12`（最大两模式概率差过小）或 `p_max < 0.34`（最高概率过低）→ `low_confidence=True`、`dominant="混合"`。
 - 置信度等级：高 / 中 / 低。报告徽章配色与 `MODE_COLORS` 一致（跑步红 / 骑行蓝 / 游泳绿 / 爬山橙 / 混合紫）。
 - **间歇运动难分标记 `interval_ambiguous`**：当样本呈「高间歇 + 高尖峰 + 无漂移」形态（典型如高强度间歇跑/骑行，二者心率形态高度重叠）时置 True。此时即便概率 ≥0.6，报告徽章也从「高置信」**降级为「中置信(难分)」**，避免武断高置信判骑行。
@@ -202,6 +190,7 @@ python scripts/generate_report.py \
 | 跑步-稳态高负荷 | 0714-pb | 跑步 0.56 | high_pct 87.4 / endH 1.00 | endurance_high 独立通道救回 |
 | 爬山-上山 | 0712_ps-1 | 爬山 0.97 | drift_pct 0.800 / uphill_extreme | uphill+endurance 双满档 |
 | 爬山-上下山 | 0712_ps-2 | 爬山 0.71 | drift_pct -0.234 双峰 | downhill_signal 触发 |
+| 爬山-上下山(未翻负) | 0718-ps-2 | 爬山 0.69 | drift_pct 0.196 / bim 0.76 / high_pct 39.4 | bimodal_climb 通道救回 |
 | 骑行-稳态 | 0702-qx-2 | 骑行 0.57 | sostd 1.29 / var 2.53 / high_pct 2.4 | steady_cycling=0.73 |
 | 骑行-间歇 | 0715-qx | 骑行 0.47 | sostd 1.69 / high_pct 0.0 | steady_cycling=0.40 |
 | 睡眠 | 0706-sp | 场景=睡眠不进分类器 | 静息占比 98.7% / HR 55.5 | detect_scenario 四维评分全命中 |
@@ -230,8 +219,8 @@ python scripts/generate_report.py \
 6. **HTML 报告心内科分析为空**：检查 JSON 是否含完整 `hrv_metrics` 字段
 7. **运动模式概率偏低/误判骑行为混合**：属启发式分类器固有局限（各模式 HR 区间重叠大）；低置信属诚实降级，最终判定须融合 GPS/踏频/海拔/加速度计。
 
-历史已修复条目（运动负荷动态化、Plan A 缺口率、sustained_high 四门控、interval_ambiguous、极限档 HRmax 三级策略、drift_pct 个体化归一化、sostd_gate、endurance_high、steady_cycling、百分比精度等）详见 [`references/version_history.md`](references/version_history.md)，按版本号检索即可。
+历史已修复条目（运动负荷动态化、Plan A 缺口率、sustained_high 四门控、interval_ambiguous、极限档 HRmax 三级策略、drift_pct 个体化归一化、sostd_gate、endurance_high、steady_cycling、bimodal_climb、百分比精度等）详见 [`references/version_history.md`](references/version_history.md)，按版本号检索即可。
 
 ## 九、历史变更附录
 
-完整版本历史（V2.5.0 → V2.2.x，含每版设计动机、门控公式、回归结果）已归档到 [`references/version_history.md`](references/version_history.md)。SKILL 主文档只保留当前版本 V2.5.2 详解；历史版本细节按需查该文件或 `git log --oneline SKILL.md`。
+完整版本历史（V2.5.3 → V2.2.x，含每版设计动机、门控公式、回归结果）已归档到 [`references/version_history.md`](references/version_history.md)。SKILL 主文档只保留当前版本 V2.5.3 详解；历史版本细节按需查该文件或 `git log --oneline SKILL.md`。
