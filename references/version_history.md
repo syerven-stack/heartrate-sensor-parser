@@ -1,6 +1,7 @@
-<!-- 从 SKILL.md 章节九拆分而来。SKILL 主文档仅保留当前版本 V2.5.1 详解，历史版本详细说明存档于此文件。-->
+<!-- 从 SKILL.md 章节九拆分而来。SKILL 主文档仅保留当前版本 V2.5.2 详解，历史版本详细说明存档于此文件。-->
 
 # 版本历史附录（完整版）
+- **V2.5.2**：心内科综合分析「二、HRV 时域指标逐项解读」由 `<p>` 段落改为 5 列表格（指标 / 数值 / 异常 / 参考正常范围 / 解读）。数据源统一收敛到 `CardioAnalyzer._hrv_rows(scenario)`，输出结构化 `List[Dict]`；`full_analysis()` 新增 `hrv_interpretation_rows` 字段供 `build_cardio_analysis` 消费，`interpret_hrv_metrics(_sleep)` 瘦身为 `[_row_to_prose(r) for r in _hrv_rows(...)]` 保留字符串接口。参考区间：睡眠 SDNN 60–120 / RMSSD 30–80 / pNN50 20–60 / CVRR 5–10 / 三角指数 30–50 / Tin 900–1200 / RR 极差 <600；运动 SDNN 30–80 / RMSSD <40 / pNN50 <3 / CVRR 5–12 / 三角指数 ≥10 / RR 极差 <1200；SDSD/SDARR/pNN20 无阈值。异常态数值超上限记 H（红胶囊）、低于下限记 L（蓝胶囊），正常态留空。首列 `<td class="metric" title="...">` 悬停显示指标定义。`<style>` 追加 `.hrv-interp-table` / `.hrv-flag-h` / `.hrv-flag-l` + ≤640px 断点。同步修正 `_HRV_TIP_KEYWORD` 里 `HRV 三角指数` / `RR 极差` 关键字空格，避免 HRV 数值面板悬停丢项。回归：0715-qx 仅 CVRR H；0706-sp SDNN/RMSSD/CVRR/RR 极差 4 项 H，其余空；HRV 面板悬停 10/10 命中，Chart.js 图表数量不变。
 - **V2.5.1**：「分期时长分布」图 UI 微调 —— 标题改为「分期时长分布（min）/有效睡眠时间（{tst} min）」，X 轴刻度去 min 后缀，tooltip 加百分比（Deep/Light/REM 分母=TST，Wake 分母=TIB）。不改分期/评分算法。
 - **V2.5.0**：`inject_sleep_structure.py` 三点自适应改进 —— (1) Deep 阈值从固定 `-2 bpm` 改为 `DEEP_DROP=0.35×(median-P10)` 分位差自适应；(2) Wake 持续型判定加 `RMSSD < 0.8×RMSSD_MED` 抑制条件，避免 REM 高波动误判；(3) 评分新增「夜间心率下降 dip=(H_full-H_sleep)/H_full」维度（2 分，SDNN 从 5 分降到 3 分补齐）。0706-sp 回归：深睡 11.4%→13.7% 进入达标区，觉醒 6→7 次识别更精细，总分 79→82 分（等级 B 保持）。
 - **V2.4.9**：新增 `scripts/inject_sleep_structure.py`（stdlib）—— 睡眠场景 HTML 追加「睡眠结构与质量评价」卡片（HRV 代理 hypnogram + 分期时长 + 0-100 评分 A/B/C/D/E 等级），并自动剥离该场景下无意义的「睡眠心率区间分布」「报文分类统计」两图。修复正则删除 Chart 初始化时结束锚点太浅导致 `plugins:[{}]});` 尾巴残留、拖垮同一 `<script>` 后续所有图表的 bug（结束锚点必须匹配到 `}]});`）。默认 `min_wake_epochs=6`、不过滤 RR 突变以保留真实觉醒信号。
