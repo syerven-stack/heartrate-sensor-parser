@@ -407,14 +407,16 @@ def write_xlsx(filepath, sheets):
         for i, (sheet_name, rows) in enumerate(sheets.items()):
             zf.writestr(f"xl/worksheets/sheet{i+1}.xml", make_sheet_xml(rows))
 
-# ==================== 输出产物开关（CLI > _user_meta.json > 默认 true） ====================
-def _load_output_config(script_root, cli_flags):
-    """读取 _user_meta.json 中的 outputs 配置，CLI 显式指定时覆盖。
+# ==================== 用户配置（CLI > _user_meta.json > 默认值） ====================
+def _load_user_config(script_root, cli_flags):
+    """读取 _user_meta.json，CLI 显式指定时覆盖。
 
-    返回 dict: {xlsx, csv_raw, report_txt}，True=产出。
+    返回 dict: {xlsx, csv_raw, report_txt, hr_max}
+    - xlsx/csv_raw/report_txt: bool，默认 True
+    - hr_max: float 或 None（未配置）
     查找路径：脚本所在目录及其父级（skill 仓库根）。
     """
-    config = {'xlsx': True, 'csv_raw': True, 'report_txt': True}
+    config = {'xlsx': True, 'csv_raw': True, 'report_txt': True, 'hr_max': None}
     candidates = [script_root, script_root.parent]
     seen = set()
     for meta_dir in candidates:
@@ -426,49 +428,35 @@ def _load_output_config(script_root, cli_flags):
         if meta_path.is_file():
             try:
                 _meta = json.loads(meta_path.read_text(encoding='utf-8'))
-                if isinstance(_meta, dict) and 'outputs' in _meta:
+                if not isinstance(_meta, dict):
+                    continue
+                # outputs 块
+                if 'outputs' in _meta:
                     outputs = _meta['outputs']
-                    for k in config:
+                    for k in ('xlsx', 'csv_raw', 'report_txt'):
                         if k in outputs and isinstance(outputs[k], bool):
                             config[k] = outputs[k]
+                # hr_max
+                if _meta.get('hr_max'):
+                    config['hr_max'] = float(_meta['hr_max'])
             except Exception:
                 pass
     # CLI 显式指定时覆盖（None 表示未传）
-    for k in config:
+    for k in ('xlsx', 'csv_raw', 'report_txt'):
         if k in cli_flags and cli_flags[k] is not None:
             config[k] = bool(cli_flags[k])
+    if cli_flags.get('hr_max') is not None:
+        config['hr_max'] = float(cli_flags['hr_max'])
     return config
 
 
 # ==================== 主处理函数 ====================
-def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_max_override=None, output_config=None):
-    # 若未显式指定 hr_max_override，尝试从多处读取 _user_meta.json 中的 hr_max：
-    #   1) 脚本所在目录及其父级（skill 仓库根，跨工作区共享用户偏好）
-    if hr_max_override is None:
-        script_root = Path(__file__).resolve().parent
-        candidates = [
-            script_root,
-            script_root.parent,
-        ]
-        seen = set()
-        for meta_dir in candidates:
-            key = str(meta_dir)
-            if key in seen:
-                continue
-            seen.add(key)
-            meta_path = meta_dir / "_user_meta.json"
-            if meta_path.is_file():
-                try:
-                    _meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    if isinstance(_meta, dict) and _meta.get("hr_max"):
-                        hr_max_override = float(_meta["hr_max"])
-                        break
-                except Exception:
-                    pass
-    # 加载输出产物配置（CLI > _user_meta.json > 默认 true）
-    if output_config is None:
-        script_root = Path(__file__).resolve().parent
-        output_config = _load_output_config(script_root, {})
+def process_single_log(log_path, out_dir, export_csv=True, export_json=True, user_config=None):
+    # 加载用户配置（CLI > _user_meta.json > 默认值）
+    if user_config is None:
+        user_config = _load_user_config(Path(__file__).resolve().parent, {})
+    hr_max_override = user_config['hr_max']
+    output_config = user_config
     Path(out_dir).mkdir(exist_ok=True, parents=True)
 
     with open(log_path, "r", encoding="utf-8") as f:
@@ -781,7 +769,7 @@ def batch_parse(folder, args):
     for f in log_files:
         print(f"正在解析: {f.name}")
         out_sub = Path(args.out) / f.stem
-        process_single_log(str(f), str(out_sub), args.csv, args.json, hr_max_override=args.hr_max, output_config=args.output_config)
+        process_single_log(str(f), str(out_sub), args.csv, args.json, user_config=args.user_config)
 
 # ==================== 入口 ====================
 def main():
@@ -798,16 +786,16 @@ def main():
     parser.add_argument("--report-txt", type=int, default=None, help="0跳过 分段运动心律波动分析报告.txt（默认从 _user_meta.json 读取，均未配置则产出）")
     args = parser.parse_args()
 
-    # 合并输出产物配置
+    # 合并用户配置（CLI > _user_meta.json > 默认值）
     script_root = Path(__file__).resolve().parent
-    cli_flags = {'xlsx': args.xlsx, 'csv_raw': getattr(args, 'csv_raw'), 'report_txt': getattr(args, 'report_txt')}
-    output_config = _load_output_config(script_root, cli_flags)
-    args.output_config = output_config
+    cli_flags = {'xlsx': args.xlsx, 'csv_raw': getattr(args, 'csv_raw'), 'report_txt': getattr(args, 'report_txt'), 'hr_max': args.hr_max}
+    user_config = _load_user_config(script_root, cli_flags)
+    args.user_config = user_config
 
     if args.batch:
         batch_parse(args.batch, args)
     elif args.log:
-        process_single_log(args.log, args.out, args.csv, args.json, hr_max_override=args.hr_max, output_config=args.output_config)
+        process_single_log(args.log, args.out, args.csv, args.json, user_config=args.user_config)
     else:
         print("必须指定 --log 单文件或 --batch 文件夹参数")
 
