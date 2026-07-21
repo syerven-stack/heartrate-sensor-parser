@@ -18,8 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 def _load_md_report_config(script_root):
-    """从 _user_meta.json 读取 outputs.md_report 配置，默认 True。"""
-    config = True
+    """从 _user_meta.json 读取 outputs.md_report 配置，未配置时返回 None。"""
     candidates = [script_root, script_root.parent]
     seen = set()
     for meta_dir in candidates:
@@ -32,10 +31,10 @@ def _load_md_report_config(script_root):
             try:
                 _meta = json.loads(meta_path.read_text(encoding='utf-8'))
                 if isinstance(_meta, dict) and 'outputs' in _meta and 'md_report' in _meta['outputs']:
-                    config = bool(_meta['outputs']['md_report'])
+                    return bool(_meta['outputs']['md_report'])
             except Exception:
                 pass
-    return config
+    return None
 
 def _parse_args():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -50,11 +49,13 @@ BASE = Path(_ARGS.out_dir).resolve() if _ARGS else Path('.')
 CSV_PATH = BASE / "心跳明细.csv"
 HTML_PATH = BASE / "heart_rate_report.html"
 MD_PATH = BASE / "sleep_structure_report.md"
-# 输出产物开关：CLI --md-report > _user_meta.json > 默认 true
+# 输出产物开关：_user_meta.json > CLI --md-report > 默认 true
+_OUTPUT_MD_REPORT = True  # 默认值
 if _ARGS and _ARGS.md_report is not None:
-    _OUTPUT_MD_REPORT = bool(_ARGS.md_report)
-else:
-    _OUTPUT_MD_REPORT = _load_md_report_config(Path(__file__).resolve().parent)
+    _OUTPUT_MD_REPORT = bool(_ARGS.md_report)  # CLI 参数
+_cfg_val = _load_md_report_config(Path(__file__).resolve().parent)
+if _cfg_val is not None:
+    _OUTPUT_MD_REPORT = _cfg_val  # 配置文件覆盖 CLI
 
 # ---------- IO ----------
 def parse_time(s):

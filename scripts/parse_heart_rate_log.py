@@ -407,16 +407,26 @@ def write_xlsx(filepath, sheets):
         for i, (sheet_name, rows) in enumerate(sheets.items()):
             zf.writestr(f"xl/worksheets/sheet{i+1}.xml", make_sheet_xml(rows))
 
-# ==================== 用户配置（CLI > _user_meta.json > 默认值） ====================
+# ==================== 用户配置（_user_meta.json > CLI > 默认值） ====================
 def _load_user_config(script_root, cli_flags):
     """读取 _user_meta.json，CLI 显式指定时覆盖。
 
     返回 dict: {xlsx, csv_raw, report_txt, hr_max}
     - xlsx/csv_raw/report_txt: bool，默认 True
     - hr_max: float 或 None（未配置）
+    优先级：_user_meta.json > CLI 参数 > 默认值
     查找路径：脚本所在目录及其父级（skill 仓库根）。
     """
     config = {'xlsx': True, 'csv_raw': True, 'report_txt': True, 'hr_max': None}
+    
+    # 先应用 CLI 参数（None 表示未传，跳过）
+    for k in ('xlsx', 'csv_raw', 'report_txt'):
+        if k in cli_flags and cli_flags[k] is not None:
+            config[k] = bool(cli_flags[k])
+    if cli_flags.get('hr_max') is not None:
+        config['hr_max'] = float(cli_flags['hr_max'])
+        
+    # 再应用 _user_meta.json，覆盖 CLI 参数
     candidates = [script_root, script_root.parent]
     seen = set()
     for meta_dir in candidates:
@@ -441,18 +451,12 @@ def _load_user_config(script_root, cli_flags):
                     config['hr_max'] = float(_meta['hr_max'])
             except Exception:
                 pass
-    # CLI 显式指定时覆盖（None 表示未传）
-    for k in ('xlsx', 'csv_raw', 'report_txt'):
-        if k in cli_flags and cli_flags[k] is not None:
-            config[k] = bool(cli_flags[k])
-    if cli_flags.get('hr_max') is not None:
-        config['hr_max'] = float(cli_flags['hr_max'])
     return config
 
 
 # ==================== 主处理函数 ====================
 def process_single_log(log_path, out_dir, export_csv=True, export_json=True, user_config=None):
-    # 加载用户配置（CLI > _user_meta.json > 默认值）
+    # 加载用户配置
     if user_config is None:
         user_config = _load_user_config(Path(__file__).resolve().parent, {})
     hr_max_override = user_config['hr_max']
