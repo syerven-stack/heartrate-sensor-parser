@@ -2,5 +2,11 @@
   "name": "heartrate-sensor-parser",
   "installedAt": 1783396538003,
   "source": "userImport",
-  "hr_max": 190
+  "hr_max": 190,
+    "outputs": {
+      "xlsx": false,
+      "csv_raw": false,
+      "report_txt": false,
+      "md_report": false
+    }
 }

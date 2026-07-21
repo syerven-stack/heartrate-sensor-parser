@@ -407,8 +407,41 @@ def write_xlsx(filepath, sheets):
         for i, (sheet_name, rows) in enumerate(sheets.items()):
             zf.writestr(f"xl/worksheets/sheet{i+1}.xml", make_sheet_xml(rows))
 
+# ==================== 输出产物开关（CLI > _user_meta.json > 默认 true） ====================
+def _load_output_config(script_root, cli_flags):
+    """读取 _user_meta.json 中的 outputs 配置，CLI 显式指定时覆盖。
+
+    返回 dict: {xlsx, csv_raw, report_txt}，True=产出。
+    查找路径：脚本所在目录及其父级（skill 仓库根）。
+    """
+    config = {'xlsx': True, 'csv_raw': True, 'report_txt': True}
+    candidates = [script_root, script_root.parent]
+    seen = set()
+    for meta_dir in candidates:
+        key = str(meta_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        meta_path = meta_dir / '_user_meta.json'
+        if meta_path.is_file():
+            try:
+                _meta = json.loads(meta_path.read_text(encoding='utf-8'))
+                if isinstance(_meta, dict) and 'outputs' in _meta:
+                    outputs = _meta['outputs']
+                    for k in config:
+                        if k in outputs and isinstance(outputs[k], bool):
+                            config[k] = outputs[k]
+            except Exception:
+                pass
+    # CLI 显式指定时覆盖（None 表示未传）
+    for k in config:
+        if k in cli_flags and cli_flags[k] is not None:
+            config[k] = bool(cli_flags[k])
+    return config
+
+
 # ==================== 主处理函数 ====================
-def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_max_override=None):
+def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_max_override=None, output_config=None):
     # 若未显式指定 hr_max_override，尝试从多处读取 _user_meta.json 中的 hr_max：
     #   1) 脚本所在目录及其父级（skill 仓库根，跨工作区共享用户偏好）
     if hr_max_override is None:
@@ -432,6 +465,10 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_
                         break
                 except Exception:
                     pass
+    # 加载输出产物配置（CLI > _user_meta.json > 默认 true）
+    if output_config is None:
+        script_root = Path(__file__).resolve().parent
+        output_config = _load_output_config(script_root, {})
     Path(out_dir).mkdir(exist_ok=True, parents=True)
 
     with open(log_path, "r", encoding="utf-8") as f:
@@ -565,19 +602,21 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_
             continue
         sheet3_rows.append(["运动负荷明细", zone, f'心跳{info["心跳数"]}次, 占比{info["占比(%)"]}%, 平均心率{info["平均心率(bpm)"]}bpm'])
 
-    excel_path = Path(out_dir) / "心率解析汇总.xlsx"
-    write_xlsx(str(excel_path), {
-        "报文总表": sheet1_rows,
-        "RR明细表": sheet2_rows,
-        "HRV汇总表": sheet3_rows,
-    })
-    print(f"Excel已生成: {excel_path}")
+    if output_config['xlsx']:
+        excel_path = Path(out_dir) / "心率解析汇总.xlsx"
+        write_xlsx(str(excel_path), {
+            "报文总表": sheet1_rows,
+            "RR明细表": sheet2_rows,
+            "HRV汇总表": sheet3_rows,
+        })
+        print(f"Excel已生成: {excel_path}")
 
     # ==================== 输出CSV ====================
     if export_csv:
-        with open(Path(out_dir) / "报文数据.csv", "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerows(sheet1_rows)
+        if output_config['csv_raw']:
+            with open(Path(out_dir) / "报文数据.csv", "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(sheet1_rows)
         with open(Path(out_dir) / "心跳明细.csv", "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
             writer.writerows(sheet2_rows)
@@ -606,10 +645,11 @@ def process_single_log(log_path, out_dir, export_csv=True, export_json=True, hr_
         device_info, pkt_hr_stats, pkt_stat, total_pkts, hrv_res,
         seg_detail, seg_summary, anomalies, log_start_time, log_end_time
     )
-    report_path = Path(out_dir) / "分段运动心律波动分析报告.txt"
-    with open(report_path, "w", encoding="utf-8") as rf:
-        rf.write(report)
-    print(f"分析报告已生成: {report_path}")
+    if output_config['report_txt']:
+        report_path = Path(out_dir) / "分段运动心律波动分析报告.txt"
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write(report)
+        print(f"分析报告已生成: {report_path}")
     print(f"\n=== 解析完成! 输出目录: {out_dir} ===")
     return report
 
@@ -741,7 +781,7 @@ def batch_parse(folder, args):
     for f in log_files:
         print(f"正在解析: {f.name}")
         out_sub = Path(args.out) / f.stem
-        process_single_log(str(f), str(out_sub), args.csv, args.json, hr_max_override=args.hr_max)
+        process_single_log(str(f), str(out_sub), args.csv, args.json, hr_max_override=args.hr_max, output_config=args.output_config)
 
 # ==================== 入口 ====================
 def main():
@@ -753,12 +793,21 @@ def main():
     parser.add_argument("--json", type=int, default=1, help="1导出JSON")
     parser.add_argument("--hr-max", type=float, default=None, dest="hr_max",
                         help="显式覆盖 HRmax（bpm），影响运动负荷区间划分；未指定时默认按 190 兜底，本次日志真跑到 ≥190 时才用 P95")
+    parser.add_argument("--xlsx", type=int, default=None, help="0跳过 心率解析汇总.xlsx（默认从 _user_meta.json 读取，均未配置则产出）")
+    parser.add_argument("--csv-raw", type=int, default=None, help="0跳过 报文数据.csv（默认从 _user_meta.json 读取，均未配置则产出）")
+    parser.add_argument("--report-txt", type=int, default=None, help="0跳过 分段运动心律波动分析报告.txt（默认从 _user_meta.json 读取，均未配置则产出）")
     args = parser.parse_args()
+
+    # 合并输出产物配置
+    script_root = Path(__file__).resolve().parent
+    cli_flags = {'xlsx': args.xlsx, 'csv_raw': getattr(args, 'csv_raw'), 'report_txt': getattr(args, 'report_txt')}
+    output_config = _load_output_config(script_root, cli_flags)
+    args.output_config = output_config
 
     if args.batch:
         batch_parse(args.batch, args)
     elif args.log:
-        process_single_log(args.log, args.out, args.csv, args.json, hr_max_override=args.hr_max)
+        process_single_log(args.log, args.out, args.csv, args.json, hr_max_override=args.hr_max, output_config=args.output_config)
     else:
         print("必须指定 --log 单文件或 --batch 文件夹参数")
 

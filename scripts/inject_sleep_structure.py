@@ -17,10 +17,32 @@ import argparse, csv, json, math, statistics, bisect, re, sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+def _load_md_report_config(script_root):
+    """从 _user_meta.json 读取 outputs.md_report 配置，默认 True。"""
+    config = True
+    candidates = [script_root, script_root.parent]
+    seen = set()
+    for meta_dir in candidates:
+        key = str(meta_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        meta_path = meta_dir / '_user_meta.json'
+        if meta_path.is_file():
+            try:
+                _meta = json.loads(meta_path.read_text(encoding='utf-8'))
+                if isinstance(_meta, dict) and 'outputs' in _meta and 'md_report' in _meta['outputs']:
+                    config = bool(_meta['outputs']['md_report'])
+            except Exception:
+                pass
+    return config
+
 def _parse_args():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out-dir', required=True,
                     help='directory containing 心跳明细.csv and heart_rate_report.html')
+    ap.add_argument('--md-report', type=int, default=None,
+                    help='0跳过 sleep_structure_report.md（默认从 _user_meta.json 读取，均未配置则产出）')
     return ap.parse_args()
 
 _ARGS = _parse_args() if __name__ == '__main__' else None
@@ -28,6 +50,11 @@ BASE = Path(_ARGS.out_dir).resolve() if _ARGS else Path('.')
 CSV_PATH = BASE / "心跳明细.csv"
 HTML_PATH = BASE / "heart_rate_report.html"
 MD_PATH = BASE / "sleep_structure_report.md"
+# 输出产物开关：CLI --md-report > _user_meta.json > 默认 true
+if _ARGS and _ARGS.md_report is not None:
+    _OUTPUT_MD_REPORT = bool(_ARGS.md_report)
+else:
+    _OUTPUT_MD_REPORT = _load_md_report_config(Path(__file__).resolve().parent)
 
 # ---------- IO ----------
 def parse_time(s):
@@ -663,7 +690,8 @@ def main():
     merge_short_wake(epochs, min_wake_epochs=6)
     m = compute_metrics(epochs, beats)
     total, grade, dims = score(m)
-    write_markdown(m, total, grade, dims, hr_base)
+    if _OUTPUT_MD_REPORT:
+        write_markdown(m, total, grade, dims, hr_base)
     inject_html(m, total, grade, dims, epochs, hr_base)
     # 控制台简报
     print("=== 睡眠结构简报 ===")
@@ -671,7 +699,8 @@ def main():
     print(f"分期: 深睡 {m['counts']['Deep']*0.5:.0f}min ({m['deep_pct']:.1f}%) | 浅睡 {m['counts']['Light']*0.5:.0f}min ({m['light_pct']:.1f}%) | REM {m['counts']['REM']*0.5:.0f}min ({m['rem_pct']:.1f}%) | 清醒 {m['counts']['Wake']*0.5:.0f}min")
     print(f"觉醒 {m['awakenings']}次 / WASO {m['waso_min']:.0f}min | 睡眠均HR {m['sleep_hr_mean']:.1f} | RMSSD {m['rmssd']:.1f} | SDNN {m['sdnn']:.1f}")
     print(f"评分: {total}/100  等级: {grade}")
-    print(f"输出: {MD_PATH}")
+    if _OUTPUT_MD_REPORT:
+        print(f"输出: {MD_PATH}")
     print(f"HTML已注入: {HTML_PATH}")
 
 if __name__ == '__main__':
