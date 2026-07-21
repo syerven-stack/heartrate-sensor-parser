@@ -546,7 +546,11 @@ def classify_mode(features):
     bim_drift_comp = _clip((drift_pct - 0.05) / 0.25)
     bim_drift_upper = 1.0 - _clip((drift_pct - 0.55) / 0.15)
     hp_gate = _clip((high_pct - 20.0) / 20.0)
-    bimodal_climb = (bim_n ** 2) * bim_drift_comp * bim_drift_upper * hp_gate
+    # 双峰性硬下限（qx-1 修正）：经验边界 骑行 ceiling≈0.67 / 爬山 floor≈0.74。
+    # 0.70~0.74 为过渡带；bim<0.70 视为"假双峰"（如骑行心率两段式分布），
+    # 不应触发上下山识别，否则会把骑行误判为爬山。真实爬山样本 bim≥0.74，过渡带满档不受影响。
+    bim_floor = _clip((bim_n - 0.70) / 0.04)
+    bimodal_climb = (bim_n ** 2) * bim_floor * bim_drift_comp * bim_drift_upper * hp_gate
     
     # 跑步专属信号 sustained_high：捕捉"持续中高强度 + 高变异 + 正/近零漂移"这一跑步指纹
     #   sustained_pct：high_pct(75-90% HRmax 心率区间占比) 从 25% 到 55% 的相对位置。
