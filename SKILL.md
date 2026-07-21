@@ -233,7 +233,7 @@ python scripts/generate_report.py \
 2. 心率数值异常：脚本自动过滤 30~220bpm 外噪声
 3. 固件版本未提取：日志中需包含 `fw=` 或 `firmware=` 字段
 4. xlsx 打开乱码：确保使用 Excel 或 WPS 打开，非文本编辑器
-5. **HTML 图表不显示（V2.4.0 已内联，通常不再发生）**：报告已内联 Chart.js，离线/沙箱预览应直接出图。若仍空白，先排查是否旧报告（含 `cdn.jsdelivr` 外链）；新报告应是 0 个 CDN 引用、含内联 `<script>window.Chart=...</script>`。空白多为 JS 语法错误导致整段中断——用 `node -e "new Function(html.match(/<script>([\s\S]*?)<\/script>/g)...) "`做语法校验，确认运动场景应有 7 个 `new Chart` 实例、睡眠 6 个。
+5. **HTML 图表不显示（V2.4.0 已内联，通常不再发生）**：报告已内联 Chart.js，离线/沙箱预览应直接出图。若仍空白，先排查是否旧报告（含 `cdn.jsdelivr` 外链）；新报告应是 0 个 CDN 引用、含内联 `<script>window.Chart=...</script>`。空白多为 JS 语法错误导致整段中断——用 `node -e "new Function(html.match(/<script>([\s\S]*?)<\/script>/g)...) "`做语法校验，确认运动场景应有 6 个 `new Chart` 实例、睡眠 6 个。
 6. **HTML 报告心内科分析为空**：检查 JSON 是否含完整 `hrv_metrics` 字段
 7. **运动模式概率偏低/误判骑行为混合**：属启发式分类器固有局限（各模式 HR 区间重叠大）；低置信属诚实降级，最终判定须融合 GPS/踏频/海拔/加速度计。
 
