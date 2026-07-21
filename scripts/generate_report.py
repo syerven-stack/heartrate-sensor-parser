@@ -837,7 +837,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .summary-box p {{ font-size: 13px; color: #7f1d1d; }}
   .cardio-section {{ margin-top: 32px; }}
   .cardio-section .card {{ border-left: 3px solid var(--accent); }}
-  .cardio-section h2 {{ color: var(--accent); }}
+  .cardio-section h2 {{ font-size: 18px; color: var(--accent); }}
   .cardio-block {{ margin-bottom: 20px; }}
   .cardio-block:last-child {{ margin-bottom: 0; }}
   .cardio-block h3 {{ font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }}
