@@ -567,7 +567,7 @@ class CardioAnalyzer:
         aer_pct_r = self.seg.get("有氧(120-150)", {}).get("占比(%)", 0)
         warm_pct_r = self.seg.get("热身(90-120)", {}).get("占比(%)", 0)
         hi_total_r = hi_pct_r + ext_pct_r
-        if hi_total_r >= 5:
+        if hi_total_r >= 15:
             recommendations.append("保持当前运动强度与结构，有氧+高强度混合训练对心肺功能提升效果显著。")
         elif aer_pct_r >= 30 or warm_pct_r >= 30:
             recommendations.append("保持当前以有氧/热身为主的训练结构，规律的有氧耐力训练对心肺功能与迷走神经张力提升效果显著。")
@@ -1073,7 +1073,7 @@ def build_exercise_summary(summary, seg, scenario="exercise"):
     main_total = sum(p for _, p in main_zones)
 
     # 负荷强度定性
-    if hi_total >= 5:
+    if hi_total >= 15:
         load_level = "高强度/剧烈"
     elif "有氧" in main_names:
         load_level = "以有氧为主的中等"
@@ -1083,17 +1083,25 @@ def build_exercise_summary(summary, seg, scenario="exercise"):
         load_level = "以静息为主的低"
 
     # 高强度判定描述
-    if hi_total >= 5:
+    if hi_total >= 15:
         hi_desc = f"，其中高强度及以上区间合计 {hi_total:.2f}%"
     else:
         hi_desc = f"，未出现有临床意义的高强度区间（高强度及以上合计仅 {hi_total:.2f}%）"
+
+    # 结尾建议随负荷等级动态化（修复：低负荷会话不应提示"避免过度训练"）
+    if load_level == "高强度/剧烈":
+        tail = "建议关注恢复期心率回落速度，避免过度训练。"
+    elif load_level.startswith("以有氧"):
+        tail = "规律的有氧耐力训练对心肺功能与迷走神经张力提升效果显著，可长期坚持。"
+    else:
+        tail = "当前运动强度整体偏低，可在身体适应后逐步增加有氧时长与强度，以获得更明显的心肺适能提升。"
 
     zone_cn = "、".join(main_names)
     assessment = (f"本次运动以{zone_cn}区间为主（合计 {main_total:.2f}%），"
                   f"整体为{load_level}运动负荷{hi_desc}。")
     return f'''<div class="summary-box">
   <h3>运动负荷评估</h3>
-  <p>{assessment} 建议关注恢复期心率回落速度，避免过度训练。</p>
+  <p>{assessment}{tail}</p>
 </div>'''
 
 

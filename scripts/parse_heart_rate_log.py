@@ -698,7 +698,7 @@ def generate_report(device_info, pkt_stats, pkt_stat, total_pkts, hrv, seg_detai
 
     lines.append("六、运动负荷评估")
     lines.append("-" * 50)
-    if seg_summary['高强度运动占比(%)'] > 20:
+    if seg_summary['高强度运动占比(%)'] >= 15:
         lines.append("  本次运动以高强度为主，属于剧烈运动负荷，")
         lines.append("  建议关注恢复期心率回落速度，避免过度训练。")
     elif seg_summary['有氧运动占比(%)'] > 30:

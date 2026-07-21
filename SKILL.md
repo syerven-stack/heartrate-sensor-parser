@@ -17,9 +17,10 @@ agent_created: true
 
 ### V2.5.4 核心变更（对比 V2.5.3）
 
-**输出产物可配置抑制**，支持 CLI 参数和 `_user_meta.json` 双通道控制，按「CLI 参数 > `_user_meta.json` > 默认产出」优先级。
+**输出产物可配置抑制**，支持 CLI 参数和 `_user_meta.json` 双通道控制，按「`_user_meta.json` > CLI 参数 > 默认产出」优先级。
 
 新增可抑制的终端产物（无下游消费）：
+
 | 产物 | 脚本 | CLI 参数 | `_user_meta.json` 字段 |
 |------|------|----------|------------------------|
 | `心率解析汇总.xlsx` | `parse_heart_rate_log.py` | `--xlsx 0` | `outputs.xlsx` |
