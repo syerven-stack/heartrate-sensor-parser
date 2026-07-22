@@ -3,49 +3,27 @@ name: heartrate-sensor-parser
 description: XOSS心率设备BLE调试日志离线解析工具。自动识别报文、计算心率/RR间期、全量HRV时域指标，支持场景自动识别（睡眠/运动）双模式分析，输出Excel/CSV/JSON+HTML可视化报告。
 metadata:
   short-description: XOSS心率BLE日志解析、HRV计算、HTML报告生成
-version: V2.5.4 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HRV时域指标表格化解读 + HTML报告(Chart.js自包含) + 心内科综合分析
+version: V2.5.5 纯Python标准库版 + 场景自动识别 + 睡眠/运动双模式HRV分析 + 睡眠结构与质量评价卡片(hypnogram+分期时长+评分) + 运动模式细分识别(个体化归一化+动态心率区间+HRmax 190 兜底/仓库根 user_meta) + HRV指标悬停解读 + HRV时域指标表格化解读 + HTML报告(Chart.js自包含) + 心内科综合分析
 device_support: XOSS X2P/X2PRO 蓝牙心率胸带
 protocol: BLE GATT 0x180D / 0x2A37
 function: XOSS心率日志解析、RR/心率换算、全量HRV计算、场景自动识别（睡眠/运动）、双模式HRV分析、运动模式细分识别（骑行/跑步/游泳/爬山/混合）、HTML可视化报告、心内科综合分析
 output: Excel/CSV/JSON 三套数据表 + 分段运动心律波动分析报告 + HTML可视化报告(Chart.js内联+心内科分析)
 agent_created: true
 ---
-# heartrate-sensor-parser 技能使用手册 V2.5.4
+# heartrate-sensor-parser 技能使用手册 V2.5.5
 
 ## 一、技能概述
 专用 XOSS 心率设备 BLE 调试日志离线解析工具。自动识别 2/4/6/8 字节（及扩展长度）全部心率报文，提取设备固件/SN/电量等参数，批量计算真实瞬时心率、RR 间期、全量 HRV 时域指标（SDNN/RMSSD/pNN50/pNN20/SDSD/SDARR/CVRR/HRV三角指数/Tin），**自动识别场景（睡眠/运动）并据此动态适配分析策略和报告内容**，动态划分心率区间（静息/热身/有氧/高强度/极限），检测心律异常（RR 间期突变/疑似早搏），**对运动场景额外做运动模式细分识别（骑行/跑步/游泳/爬山/混合）**，输出标准化 Excel 三表 + CSV + JSON + 分段运动心律波动分析报告 + HTML 可视化报告（**Chart.js 已内联，离线/沙箱预览可直接出图，无需联网**）。
 
-### V2.5.4 核心变更（对比 V2.5.3）
-
-**输出产物可配置抑制**，支持 CLI 参数和 `_user_meta.json` 双通道控制，按「`_user_meta.json` > CLI 参数 > 默认产出」优先级。
-
-新增可抑制的终端产物（无下游消费）：
-
-| 产物 | 脚本 | CLI 参数 | `_user_meta.json` 字段 |
-|------|------|----------|------------------------|
-| `心率解析汇总.xlsx` | `parse_heart_rate_log.py` | `--xlsx 0` | `outputs.xlsx` |
-| `报文数据.csv` | `parse_heart_rate_log.py` | `--csv-raw 0` | `outputs.csv_raw` |
-| `分段运动心律波动分析报告.txt` | `parse_heart_rate_log.py` | `--report-txt 0` | `outputs.report_txt` |
-| `sleep_structure_report.md` | `inject_sleep_structure.py` | `--md-report 0` | `outputs.md_report` |
-
-不受影响的必出产物：`分析结果.json`（`generate_report.py` 入参）、`心跳明细.csv`（`generate_report.py` 和 `inject_sleep_structure.py` 入参）、`heart_rate_report.html`（`inject_sleep_structure.py` 入参）。
-
-`_user_meta.json` 示例：
-```json
-{
-  "hr_max": 180,
-  "outputs": {
-    "xlsx": false,
-    "csv_raw": false,
-    "report_txt": false,
-    "md_report": false
-  }
-}
-```
+### V2.5.5 核心变更（运动负荷时长计算）
+- 解析端 `parse_heart_rate_log.py` → `split_exercise_segment`：分区遍历时累加各 zone 内 beats 的 `rr_ms`，为每个区间写入 `时长(秒)`，并把全部 beats 的 `rr_ms` 累加写入 `exercise_segments._meta.总时长(秒)`。
+- 时长口径：以「各区间 beats 的 RR 间期之和」计时（非日志起止跨度），保证「各区时长之和 = 总时长」，内部完全自洽、不受首尾空隙影响。
+- 数据落点：随 `exercise_segments` 一并写入 `分析结果.json`，报告端由 JSON 直接读取渲染（环形图 tooltip 显示各区时长、标题显示总时长）。
+- 容错：旧 JSON 缺该字段时报告端回退为 0，不报错、不影响其他图表。
 
 ### 更早版本变更
 
-V2.5.3 及更早版本的详细变更说明已归档到 [`references/version_history.md`](references/version_history.md)；如需完整技术细节可直接查看该文件，或回溯 git 历史（`git log --oneline SKILL.md`）。
+V2.5.4 及更早版本的详细变更说明已归档到 [`references/version_history.md`](references/version_history.md)；如需完整技术细节可直接查看该文件，或回溯 git 历史（`git log --oneline SKILL.md`）。
 
 ### 前置条件
 - **Python 3.8+（仅使用标准库，无需安装第三方依赖、无需 pip install）**

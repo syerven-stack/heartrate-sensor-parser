@@ -242,6 +242,7 @@ def split_exercise_segment(rr_rows, hr_max_override=None):
         zone_map.setdefault(key, []).append(row)
 
     total = len(rr_rows)
+    total_rr_ms = sum((r.get("rr_ms") or 0) for r in rr_rows)
     seg_info = {}
     for i, key in enumerate(LEGACY_ZONE_KEYS):
         rows = zone_map.get(key, [])
@@ -249,6 +250,7 @@ def split_exercise_segment(rr_rows, hr_max_override=None):
         pct = count / total * 100 if total > 0 else 0
         avg_rr = mean([r["rr_ms"] for r in rows]) if rows else 0
         avg_hr = mean([r["inst_hr"] for r in rows]) if rows else 0
+        zone_rr_ms = sum((r.get("rr_ms") or 0) for r in rows)
         lo = bins[i]
         hi = bins[i + 1] if i + 1 < len(bins) else 999.0
         seg_info[key] = {
@@ -256,10 +258,12 @@ def split_exercise_segment(rr_rows, hr_max_override=None):
             "占比(%)": round(pct, 2),
             "平均RR(ms)": round(avg_rr, 2) if rows else 0,
             "平均心率(bpm)": round(avg_hr, 2) if rows else 0,
+            "时长(秒)": round(zone_rr_ms / 1000.0, 1),
             "阈值下界(bpm)": round(lo, 1),
             "阈值上界(bpm)": round(hi, 1) if hi < 900 else None,
         }
-    seg_info["_meta"] = {"hr_max_ref": round(hr_max_ref, 1), "hr_p95": round(hr_p95, 1), "hr_max_source": hr_max_source}
+    seg_info["_meta"] = {"hr_max_ref": round(hr_max_ref, 1), "hr_p95": round(hr_p95, 1), "hr_max_source": hr_max_source,
+                         "总时长(秒)": round(total_rr_ms / 1000.0, 1)}
 
     rest_pct = seg_info[LEGACY_ZONE_KEYS[0]]["占比(%)"]
     aerobic_pct = seg_info[LEGACY_ZONE_KEYS[1]]["占比(%)"] + seg_info[LEGACY_ZONE_KEYS[2]]["占比(%)"]

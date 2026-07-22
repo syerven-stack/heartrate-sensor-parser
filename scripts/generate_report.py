@@ -897,13 +897,34 @@ def generate_html(json_path, csv_path, output_path):
     time_range = data.get("log_time_range", {})
     mode_dict = data.get("exercise_mode", {})
 
+    # 总运动时长展示串（用于运动负荷分布标题，V2.5.5）
+    _seg_keys = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
+    _seg_meta = seg.get("_meta", {}) or {}
+    _total_dur_s = float(_seg_meta.get("总时长(秒)", 0) or 0)
+    if _total_dur_s <= 0:
+        _total_dur_s = sum(float(seg.get(k, {}).get("时长(秒)", 0) or 0) for k in _seg_keys)
+    total_dur_text = _fmt_dur(_total_dur_s)
+
+    # 与「运动模式识别」置信度 pill 同款配色（V2.5.5）
+    _conf = float(mode_dict.get("confidence", 0.0) or 0)
+    _low = bool(mode_dict.get("low_confidence", False))
+    _amb = bool(mode_dict.get("interval_ambiguous", False))
+    if _amb:
+        mode_badge_color = "#f59e0b"
+    elif _conf >= 0.6 and not _low:
+        mode_badge_color = "#22c55e"
+    elif _conf >= 0.4:
+        mode_badge_color = "#f59e0b"
+    else:
+        mode_badge_color = "#ef4444"
+
     header = build_header(time_range, cardio["scenario"])
     device_info = build_device_info(device)
     data_overview = build_data_overview(pkt, hrv, cardio)
     exercise_summary_html = build_exercise_summary(summary, seg, cardio["scenario"])
     exercise_mode_html = build_exercise_mode(mode_dict, cardio["scenario"])
     hrv_metrics_html = build_hrv_metrics(hrv, cardio["hrv_interpretations"])
-    charts_row1 = build_charts_row1(cardio["scenario"], exercise_mode_html)
+    charts_row1 = build_charts_row1(cardio["scenario"], exercise_mode_html, total_dur_text, mode_badge_color)
     trend_chart = build_trend_chart()
     hrv_charts = build_hrv_charts()
     anomaly_table = build_anomaly_chart(anomalies, data.get("anomaly_count", 0))
@@ -1145,7 +1166,7 @@ def build_exercise_mode(mode_dict, scenario="exercise"):
                     '建议结合踏频 / GPS / 加速度计融合判定（若为切割的子日志，漂移信号可能已被截断）。</p>')
 
     return f'''<div class="card" style="margin-bottom:16px">
-  <h2>运动模式识别：<b style="color:{badge_color}">{dom}</b> <span class="badge" style="background:{badge_color};color:#fff">{badge_text} {conf_pct}%</span></h2>
+  <h2>运动模式识别：<b style="color:{badge_color}">{dom}</b> <span class="badge" style="background:{badge_color};color:#fff;font-size:13px;padding:3px 10px">{badge_text} {conf_pct}%</span></h2>
   <p style="margin:0 0 10px;font-size:13px;color:#374151">基于逐拍 RR 间期 / 瞬时心率的时域形态学特征（间歇度、尖峰率、平稳度、双峰性、平均负荷、HR 漂移等）做<b>启发式估算</b>。</p>
   <div class="chart-wrap" style="height:300px"><canvas id="modeChart"></canvas></div>
   {note}
@@ -1211,7 +1232,7 @@ def build_hrv_metrics(hrv, hrv_tips=None):
 </div>'''
 
 
-def build_charts_row1(scenario="exercise", exercise_mode_html=""):
+def build_charts_row1(scenario="exercise", exercise_mode_html="", total_dur_text="", dur_badge_color="#22c55e"):
     """第一行图表区（grid-2）。
 
     左：运动负荷分布 / 睡眠心率区间分布（环形图）。
@@ -1225,8 +1246,9 @@ def build_charts_row1(scenario="exercise", exercise_mode_html=""):
     <div class="chart-wrap" style="height:320px; width:100%;"><canvas id="exerciseChart"></canvas></div>
   </div>'''
     else:
+        dur_html = f'：<span class="badge" style="background:{dur_badge_color};color:#fff;font-size:13px;padding:3px 10px">{total_dur_text}</span>' if total_dur_text else ""
         left = f'''<div class="card">
-    <h2>{chart_title}</h2>
+    <h2>{chart_title}{dur_html}</h2>
     <div class="chart-wrap" style="aspect-ratio: 1/1; width: 100%; max-width: 400px; margin: 0 auto;"><canvas id="exerciseChart"></canvas></div>
   </div>'''
     if exercise_mode_html:
@@ -1446,11 +1468,23 @@ def build_cardio_analysis(cardio, data):
 </div>'''
 
 
+def _fmt_dur(sec):
+    """将秒数格式化为智能时长串：>=1h 显示 Xh Ym，否则 X.X min。"""
+    sec = float(sec)
+    if sec >= 3600:
+        return f"{int(sec // 3600)}小时 {int(round((sec % 3600) / 60)):02d}分钟"
+    return f"{int(round(sec / 60)):02d} 分钟"
+
+
 def build_chart_js(seg, pkt_cls, trend_labels, trend_values, hrv, anomalies=None, scenario="exercise", mode_dict=None, show_packet=False):
     """生成Chart.js脚本 - 优化版: 高清、圆环样式、悬停性能提升"""
     # 运动负荷数据
     seg_keys = ["静息(<90)", "热身(90-120)", "有氧(120-150)", "高强度(150-180)", "极限(>180)"]
     seg_values = [seg.get(k, {}).get("占比(%)", 0) for k in seg_keys]
+
+    # 各区间时长(秒) —— 用于环形图 tooltip（V2.5.5）
+    seg_dur_s = [float(seg.get(k, {}).get("时长(秒)", 0) or 0) for k in seg_keys]
+    seg_dur_min = [round(s / 60.0, 1) for s in seg_dur_s]
 
     # 报文分类
     pkt_labels = [c["packet_type"].split("(")[0] for c in pkt_cls]
@@ -1669,7 +1703,7 @@ new Chart(document.getElementById('exerciseChart'), {{
 }});
 '''
     else:
-        seg_chart_block = f'''// === 运动负荷环形图 (已优化: 高清/圆环样式/悬停性能) ===
+        seg_chart_block = f'''// === 运动负荷环形图 (已优化: 高清/圆环样式/悬停性能 + 各区时长 tooltip V2.5.5) ===
 new Chart(document.getElementById('exerciseChart'), {{
   type: 'doughnut',
   data: {{
@@ -1728,7 +1762,8 @@ new Chart(document.getElementById('exerciseChart'), {{
         cornerRadius: 4,
         callbacks: {{
           label: function(context) {{
-            return context.label + ': ' + context.raw + '%';
+            var d = {json.dumps(seg_dur_min)}[context.dataIndex];
+            return context.label + ': ' + context.raw + '%  ·  ' + d + ' min';
           }}
         }}
       }}
